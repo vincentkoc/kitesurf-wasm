@@ -9,7 +9,7 @@
   },
   "scripts": {
     "build": "node scripts/build.mjs",
-    "test": "node --experimental-wasm-exnref --test test/core.test.mjs",
+    "test": "node --experimental-wasm-exnref --test test/*.test.mjs",
     "smoke:browser": "node test/browser.mjs",
     "bench:core": "node --experimental-wasm-exnref scripts/bench-core.mjs",
     "eval:browser": "node scripts/eval-browser.mjs",

@@ -24,7 +24,7 @@ npm run smoke:browser
 npm run pack:artifacts
 ```
 
-`npm run build` obtains the exact upstream commit in `.cache/upstream`, runs its frozen pnpm install and Bazel build, bundles with Wrangler **dry-run only**, and invokes pinned workerd's compiler. Nothing is deployed to Cloudflare. A previously built, clean checkout can be used explicitly:
+`npm run build` obtains the exact upstream commit in `.cache/upstream`, applies the reviewed [compiled-WASM sharing patch](patches/README.md), runs its frozen pnpm install and Bazel build, bundles with Wrangler **dry-run only**, and invokes pinned workerd's compiler. Nothing is deployed to Cloudflare. A previously built checkout at the pinned commit, either clean or carrying exactly that patch, can be used explicitly:
 
 ```sh
 npm run build -- --upstream /path/to/kitesurf --skip-upstream-build
@@ -48,7 +48,7 @@ npm run build -- --upstream /path/to/kitesurf --skip-upstream-build --fixture
 ./packages/browser/bin/kitesurf-fixture --experimental --socket-addr=http=127.0.0.1:18788
 ```
 
-The fixture variant permits outbound loopback and enables upstream's private-network flag. It is never packed in the production tarball. Do not use it for untrusted pages. Browser sessions are still per CDP connection and every navigation gets a new page isolate; no isolate reuse optimization is applied.
+The fixture variant permits outbound loopback and enables upstream's private-network flag. It is never packed in the production tarball. Do not use it for untrusted pages. Browser sessions are still per CDP connection and every navigation gets a new page isolate. Immutable compiled WASM code is shared, but linear memory, DOM and page globals are not.
 
 ## Node component
 
@@ -75,7 +75,7 @@ There is no network bridge or fake successful fetch: external-resource callbacks
 
 `npm run bench:core` compares rereading/recompiling WASM for each fresh worker with sharing its compiled module. It reports wall time, process CPU and RSS for eight interleaved pairs. This is a **Node component initialization** optimization, not evidence that CDP browsing beats Chromium or Lightpanda. See `docs/measurements.md` for the observed local result.
 
-The full-browser smoke covers CDP, typed input, click handlers, Boa evaluation, PNG, cross-navigation global isolation and tab teardown. Upstream/workerd currently emits `script terminated for unknown reasons` diagnostics during explicit page disposal even when these assertions pass. Logs are retained in CI; this is not a clean-error-log or production-readiness claim. The separate [browser evaluation](docs/browser-evaluation.md) records readiness, navigation, same-document JS and lifecycle memory without treating accumulated memory as a fresh-page footprint. Cross-browser results still require equivalent successful runs on a qualified host.
+The full-browser smoke covers CDP, typed input, click handlers, Boa evaluation, PNG, cross-navigation and concurrent-tab global isolation, and tab teardown. Upstream/workerd currently emits `script terminated for unknown reasons` diagnostics during explicit page disposal even when these assertions pass. Logs are retained in CI; this is not a clean-error-log or production-readiness claim. The separate [browser evaluation](docs/browser-evaluation.md) records readiness, navigation, same-document JS and lifecycle memory without treating accumulated memory as a fresh-page footprint. Cross-browser results still require equivalent successful runs on a qualified host.
 
 Upstream already enables SIMD, release optimization and LTO. This packaging does not blindly change those settings, reuse page isolates or claim an unmeasured full-browser speedup.
 

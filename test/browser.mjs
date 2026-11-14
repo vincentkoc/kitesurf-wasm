@@ -39,12 +39,17 @@ try {
   await page.evaluate('globalThis.secret = 123');
   await goto('<h1>New document</h1>');
   assert.equal(await page.evaluate('typeof secret'), 'undefined');
+  await page.evaluate('globalThis.tabState = "first"');
   const page2 = await browser.newPage();
   await page2.goto('data:text/html,<h1>Second tab</h1>');
+  assert.equal(await page2.evaluate('typeof globalThis.tabState'), 'undefined');
+  await page2.evaluate('globalThis.tabState = "second"');
+  assert.equal(await page.evaluate('globalThis.tabState'), 'first');
+  assert.equal(await page2.evaluate('globalThis.tabState'), 'second');
   await page2.close();
   assert.equal(await page.$eval('h1', el => el.textContent), 'New document');
   await page.close();
-  console.log(JSON.stringify({ passed: true, checks: ['CDP', 'input', 'click', 'Boa', 'PNG', 'navigation isolation', 'tab lifecycle'] }));
+  console.log(JSON.stringify({ passed: true, checks: ['CDP', 'input', 'click', 'Boa', 'PNG', 'navigation isolation', 'concurrent tab isolation', 'tab lifecycle'] }));
 } finally {
   if (browser) await browser.disconnect();
   child.kill('SIGTERM');

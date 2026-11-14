@@ -77,7 +77,37 @@ further to 657 MiB. That establishes some GC-sensitive retention, not an allocat
 diagnosis, nor proof all remaining memory is live. Forced GC is not part of the benchmark and
 must not be presented as a runtime fix.
 
-The loader/bundle configuration matches the upstream model inspected. No safe lifecycle or
-module-cache fix is established by these measurements. Runtime changes need a separate
-allocation/ownership investigation; sharing mutable page workers would break the tested
-navigation isolation invariant.
+## Compiled-module repair
+
+The package now applies `patches/compiled-browser-wasm.patch` to the pinned source. Both
+PageScript and renderer loads receive an imported `WebAssembly.Module` instead of copied raw
+bytes. The pinned workerd supports this input and shares compiled code. Each anonymous worker
+still creates a separate instance and memory; navigation and concurrent-tab isolation are
+tested. The build records the patch digest and refuses unrelated tracked source changes.
+
+A ten-navigation diagnostic with the corrected evaluator observed approximately 265 ms median
+navigation and 540 MiB PSS after the batches, versus the preceding raw-byte build's 282 ms and
+1,048 MiB. First-page PSS was approximately 271 versus 362 MiB. These are sequential local
+diagnostics, not statistical speedup estimates.
+
+This does not establish constant-memory browsing. A 100-navigation lifecycle run with the
+compiled-module patch reached approximately 1,449 MiB PSS, with visible normal-GC reductions
+during the run. Explicitly clearing retired session references did not improve it, so that
+experiment was discarded. Testing the same patched configuration with workerd 1.20261114.1
+also did not improve retention; the package keeps its original pin. Further investigation must
+distinguish live worker ownership from allocator high-water memory before claiming a leak fix.
+No forced GC, process recycling or mutable-isolate reuse was added.
+
+## Hosted comparison
+
+CI installs Chrome for Testing 156.0.8078.47 and checksum-verified Lightpanda 1.0.2 on the same
+Linux runner as the Kitesurf fixture. It executes two separate-process latency rounds in
+opposite engine order, with 20 navigations and 20 same-document JS operations per invocation,
+plus one 20-navigation lifecycle pass per engine. The results and stderr are retained with
+the package artifacts. Downloads and dependency installation occur before measurement.
+
+This makes a fresh comparison possible without depending on the developer host's Chromium
+shared libraries. It does not make the runner dedicated or eliminate host/order noise.
+Read the individual run hashes, versions and host-load observations before comparing results.
+The historical OpenClaw workflow results and these direct-CDP measurements are different
+workloads and must not be combined into one speedup claim.
