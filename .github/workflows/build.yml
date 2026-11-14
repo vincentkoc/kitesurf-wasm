@@ -21,7 +21,38 @@ jobs:
       - run: npm test
       - run: npm run smoke:browser 2>&1 | tee browser-smoke.log
         shell: bash
+      - run: npm run build -- --skip-upstream-build --fixture
+      - run: npm run eval:browser -- --engine kitesurf --binary packages/browser/bin/kitesurf-fixture --mode lifecycle --iterations 5 --output artifacts/browser-lifecycle.json
       - run: npm run pack:artifacts
+      - name: Install comparison browsers
+        shell: bash
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y libnss3 libnspr4 libatk1.0-0t64 libatk-bridge2.0-0t64 libcups2t64 libxkbcommon0 libatspi2.0-0t64 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libgbm1 libasound2t64 fonts-liberation
+          mkdir -p build/comparison
+          curl -fLsS --retry 3 https://storage.googleapis.com/chrome-for-testing-public/156.0.8078.47/linux64/chrome-linux64.zip -o build/comparison/chrome.zip
+          unzip -q build/comparison/chrome.zip -d build/comparison
+          curl -fLsS --retry 3 https://github.com/lightpanda-io/browser/releases/download/1.0.2/lightpanda-x86_64-linux -o build/comparison/lightpanda
+          echo 'ae7d01d261efb9e480e18ce3424533332883863bcf70b12a4321b5733f37e19e  build/comparison/lightpanda' | sha256sum -c -
+          chmod +x build/comparison/lightpanda
+      - name: Corrected three-browser comparison
+        shell: bash
+        run: |
+          for round in 1 2; do
+            order='chromium lightpanda kitesurf'
+            if [ "$round" = 2 ]; then order='kitesurf lightpanda chromium'; fi
+            for engine in $order; do
+              case "$engine" in
+                chromium) binary=build/comparison/chrome-linux64/chrome ;;
+                lightpanda) binary=build/comparison/lightpanda ;;
+                kitesurf) binary=packages/browser/bin/kitesurf-fixture ;;
+              esac
+              npm run eval:browser -- --engine "$engine" --binary "$binary" --mode latency --iterations 20 --output "artifacts/$engine-latency-$round.json"
+              if [ "$round" = 1 ]; then
+                npm run eval:browser -- --engine "$engine" --binary "$binary" --mode lifecycle --iterations 20 --output "artifacts/$engine-lifecycle.json"
+              fi
+            done
+          done
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
