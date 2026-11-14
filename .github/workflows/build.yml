@@ -21,6 +21,8 @@ jobs:
       - run: npm test
       - run: npm run smoke:browser 2>&1 | tee browser-smoke.log
         shell: bash
+      - run: npm run build -- --skip-upstream-build --fixture
+      - run: npm run eval:browser -- --engine kitesurf --binary packages/browser/bin/kitesurf-fixture --mode lifecycle --iterations 5 --output artifacts/browser-lifecycle.json
       - run: npm run pack:artifacts
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
