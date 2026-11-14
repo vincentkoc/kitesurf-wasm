@@ -18,6 +18,8 @@ export async function createCore({ timeoutMs = 30_000, module } = {}) {
   }
   const worker = new Worker(new URL('./worker.mjs', import.meta.url), {
     workerData: { module: module ?? await compileCore() },
+    // Parent eval/REPL flags such as --input-type are invalid for a worker file.
+    execArgv: [],
   });
   let sequence = 0;
   let closed = false;

@@ -54,9 +54,16 @@ const entries = files.map((file, i) => `[${q('/' + relative(publicDir, file))},[
 writeFileSync(join(build, 'assets.js'), `${imports.join('\n')}\nconst assets = new Map([${entries.join(',')}]);\nexport default {fetch(request) { const asset=assets.get(new URL(request.url).pathname); return asset ? new Response(asset[0], {headers:{'content-type':asset[1]}}) : new Response('not found',{status:404}); }};\n`);
 const assetModules = [module('assets.js', 'esModule', join(build, 'assets.js')), ...files.map((file, i) => module(`asset-${i}`, 'data', file))];
 const opts = JSON.parse(readFileSync(join(dist, 'engine-mf.json')));
-opts.bindings.KITESURF_VERSION = lock.commit.slice(0, 12);
-opts.bindings.KITESURF_ALLOW_PRIVATE_NETWORK = fixture ? '1' : '';
-const bindings = Object.entries(opts.bindings).map(([name, value]) => `(name=${q(name)},text=${q(value)})`);
+// Do not embed local dev-vars or unrelated environment bindings into artifacts.
+const values = {
+  KITESURF_ENV: 'production', KITESURF_VERSION: lock.commit.slice(0, 12),
+  KITESURF_RESOURCE_DRAIN_QUIET_TURNS: '', KITESURF_SIMULATE_PROD_EVAL: '',
+  KITESURF_DISABLE_PARTIAL_RASTER: '', KITESURF_PAGE_CPU_MS_CAP: '',
+  KITESURF_PAGE_WALL_MS_CAP: '', KITESURF_LAG_WATCHDOG: '',
+  KITESURF_INSPECTOR_BASE_URL: '', KITESURF_INSPECTOR_FALLBACK_URL: '',
+  KITESURF_ALLOW_PRIVATE_NETWORK: fixture ? '1' : '', WEB_BOT_AUTH_SIGNATURE_AGENT: '',
+};
+const bindings = Object.entries(values).map(([name, value]) => `(name=${q(name)},text=${q(value)})`);
 bindings.push('(name="LOADER",workerLoader=())', '(name="FONT_ASSETS",service="assets")');
 writeFileSync(join(build, 'config.capnp'), `using Workerd = import "/workerd/workerd.capnp";
 const config :Workerd.Config = (

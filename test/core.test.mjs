@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { compileCore, createCore } from '../packages/core/index.mjs';
 
 test('cache immutable compilation; isolate mutable state and close deterministically', async () => {
@@ -25,4 +26,13 @@ test('timed out Boa execution terminates the entire worker', async () => {
     await assert.rejects(core.evaluate('while (true) {}'), /exceeded/);
     await assert.rejects(core.scan('x'), /closed/);
   } finally { await core.close(); }
+});
+
+test('works from Node --input-type=module callers', () => {
+  execFileSync(process.execPath, ['--input-type=module', '--eval', `
+    import { createCore } from './packages/core/index.mjs';
+    const core = await createCore();
+    try { if (await core.evaluate('6*7') !== '42') throw new Error('bad result'); }
+    finally { await core.close(); }
+  `], { cwd: new URL('..', import.meta.url), timeout: 30_000 });
 });
