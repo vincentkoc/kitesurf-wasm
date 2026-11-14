@@ -1,0 +1,13 @@
+import { readFileSync } from 'node:fs';
+import * as core from '../packages/core/vendor/kitesurf_core.js';
+const sample = stage => ({stage, rssBytes:process.memoryUsage().rss, heapBytes:process.memoryUsage().heapUsed});
+const samples=[sample('before-read')];
+const bytes = readFileSync(new URL('../packages/core/vendor/kitesurf_core_bg.wasm', import.meta.url));
+const module = await WebAssembly.compile(bytes);
+samples.push(sample('compiled'));
+core.__setBridgeFetchResource(() => {throw Error('offline');});
+const exports = core.initSync({module});
+samples.push({...sample('initialized'),wasmMemoryBytes:exports.memory.buffer.byteLength});
+core.ks_render_html_to_image('<h1>Memory sample</h1>', 'https://example.invalid/', 800, 600, 'png', 90);
+samples.push({...sample('rendered-800x600'),wasmMemoryBytes:exports.memory.buffer.byteLength});
+console.log(JSON.stringify(samples,null,2));

@@ -29,7 +29,7 @@ test('timed out Boa execution terminates the entire worker', async () => {
 });
 
 test('works from Node --input-type=module callers', () => {
-  execFileSync(process.execPath, ['--input-type=module', '--eval', `
+  execFileSync(process.execPath, [...process.execArgv.filter(arg => arg === '--experimental-wasm-exnref'), '--input-type=module', '--eval', `
     import { createCore } from './packages/core/index.mjs';
     const core = await createCore();
     try { if (await core.evaluate('6*7') !== '42') throw new Error('bad result'); }

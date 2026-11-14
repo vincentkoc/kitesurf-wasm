@@ -1,0 +1,24 @@
+[
+  {
+    "stage": "before-read",
+    "rssBytes": 54996992,
+    "heapBytes": 5525288
+  },
+  {
+    "stage": "compiled",
+    "rssBytes": 112668672,
+    "heapBytes": 5530520
+  },
+  {
+    "stage": "initialized",
+    "rssBytes": 116817920,
+    "heapBytes": 6687792,
+    "wasmMemoryBytes": 3866624
+  },
+  {
+    "stage": "rendered-800x600",
+    "rssBytes": 166182912,
+    "heapBytes": 6876344,
+    "wasmMemoryBytes": 6094848
+  }
+]

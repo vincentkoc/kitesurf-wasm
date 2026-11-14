@@ -7,6 +7,9 @@ export function compileCore() {
   return compilation ??= readFile(new URL('./vendor/kitesurf_core_bg.wasm', import.meta.url))
     .then(bytes => WebAssembly.compile(bytes)).catch(error => {
       compilation = undefined;
+      if (error instanceof WebAssembly.CompileError) {
+        throw new Error('Kitesurf requires WASM exception references. On Node 22/24, launch with node --experimental-wasm-exnref.', { cause: error });
+      }
       throw error;
     });
 }

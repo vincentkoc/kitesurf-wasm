@@ -78,3 +78,7 @@ There is no network bridge or fake successful fetch: external-resource callbacks
 The full-browser smoke covers CDP, typed input, click handlers, Boa evaluation, PNG, cross-navigation global isolation and tab teardown. Upstream/workerd currently emits `script terminated for unknown reasons` diagnostics during explicit page disposal even when these assertions pass. Logs are retained in CI; this is not a clean-error-log or production-readiness claim. Whole-process memory after disposal and cross-browser workload performance need independent evaluation.
 
 Upstream already enables SIMD, release optimization and LTO. This packaging does not blindly change those settings, reuse page isolates or claim an unmeasured full-browser speedup.
+
+### Node runtime compatibility
+
+Upstream WASM uses exception references. Node 22/24 needs `node --experimental-wasm-exnref app.mjs` when using the core API. The repository test and benchmark scripts pass this flag. Node 26.12.1 was also verified with the feature enabled by default. The standalone browser does not require Node or this flag. No WASM rewriting or unsafe host shim is used.

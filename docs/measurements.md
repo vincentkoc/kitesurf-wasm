@@ -12,3 +12,7 @@ Raw samples: [core-benchmark.json](core-benchmark.json). CPU includes worker thr
 This verifies a component-creation saving, not a full-browser speedup. No browser isolate is reused. The standalone CDP browser keeps upstream semantics and already avoids Wrangler/Node supervisory processes at runtime. Its full workload needs the independent Chromium/Lightpanda/Kitesurf comparison; do not substitute these component results for it.
 
 The browser smoke passed its behavioral assertions. Explicit page teardown emitted workerd's `script terminated for unknown reasons` diagnostics, also observed in the original prototype. This remains an open upstream lifecycle/diagnostic limitation, not a proven leak. No runtime-error suppression was added.
+
+## Memory attribution probe
+
+`node --experimental-wasm-exnref scripts/probe-core-memory.mjs` measures the core separately from the workerd browser. The retained [sample](core-memory.json) shows only a few MiB of WASM linear memory at initialization and after one 800×600 render, while Node process RSS is much larger. This demonstrates that linear-memory size alone is not whole-process cost; it does not identify the cause of the earlier 1.9 GiB browser peak. Compiled code, fonts/assets, render/page isolates and allocator retention remain separate contributors to investigate. No claim of a browser memory leak or improvement is made.
