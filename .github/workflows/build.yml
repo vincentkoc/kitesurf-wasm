@@ -20,6 +20,7 @@ jobs:
       - run: npm run build
       - run: npm test
       - run: npm run smoke:browser 2>&1 | tee browser-smoke.log
+        shell: bash
       - run: npm run pack:artifacts
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
