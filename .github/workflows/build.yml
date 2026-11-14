@@ -1,5 +1,8 @@
 name: Reproducible packages
 on: [push, pull_request, workflow_dispatch]
+concurrency:
+  group: kitesurf-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
 permissions:
   contents: read
 jobs:
