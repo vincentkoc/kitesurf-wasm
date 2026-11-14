@@ -1,0 +1,31 @@
+name: Reproducible packages
+on: [push, pull_request, workflow_dispatch]
+concurrency:
+  group: kitesurf-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+permissions:
+  contents: read
+jobs:
+  linux-x64:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22.16.0'
+          cache: npm
+      - run: npm ci
+      - run: corepack enable
+      - run: npm run build
+      - run: npm test
+      - run: npm run smoke:browser 2>&1 | tee browser-smoke.log
+      - run: npm run pack:artifacts
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: kitesurf-linux-x64
+          path: |
+            artifacts/
+            browser-smoke.log
+          if-no-files-found: error
