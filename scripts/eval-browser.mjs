@@ -212,7 +212,13 @@ try {
   }
   fixture.closeAllConnections();
   if (fixture.listening) await new Promise(r => fixture.close(r));
-  await fs.rm(profile, { recursive: true, force: true });
+  try {
+    await fs.rm(profile, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
+  } catch (error) {
+    report.cleanupError = error.message;
+    report.success = false;
+    process.exitCode = 1;
+  }
   await fs.mkdir(resolve(output, '..'), { recursive: true });
   await fs.writeFile(output, JSON.stringify(report, null, 2) + '\n', { flag: 'wx' });
   await fs.writeFile(output + '.stderr', stderr, { flag: 'wx' });

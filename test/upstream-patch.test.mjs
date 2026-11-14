@@ -4,7 +4,7 @@ import { mkdtempSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { applyUpstreamPatch } from '../scripts/upstream-patch.mjs';
+import { applyUpstreamPatch, restoreManagedUpstreamPatch } from '../scripts/upstream-patch.mjs';
 
 test('applies only the pinned patch, is idempotent, and preserves unrelated edits', () => {
   const dir = mkdtempSync(join(tmpdir(), 'kitesurf-patch-'));
@@ -27,12 +27,20 @@ test('applies only the pinned patch, is idempotent, and preserves unrelated edit
     git(['config', 'diff.context', '0']);
     git(['config', 'diff.algorithm', 'histogram']);
     git(['config', 'diff.external', '/nonexistent-diff-helper']);
-    applyUpstreamPatch(dir, commit, patch);
+    applyUpstreamPatch(dir, commit, patch, { managed: true });
     assert.equal(readFileSync(join(dir, 'source.txt'), 'utf8'), 'after\n');
     applyUpstreamPatch(dir, commit, patch);
     assert.throws(() => applyUpstreamPatch(dir, '0'.repeat(40), patch), /exact pinned/);
+    restoreManagedUpstreamPatch(dir);
+    assert.equal(readFileSync(join(dir, 'source.txt'), 'utf8'), 'before\n');
+    // A new package patch can now replace the old one in the managed cache.
+    writeFileSync(patch, readFileSync(patch, 'utf8').replace('+after\n', '+updated\n'));
+    applyUpstreamPatch(dir, commit, patch, { managed: true });
+    assert.equal(readFileSync(join(dir, 'source.txt'), 'utf8'), 'updated\n');
     writeFileSync(join(dir, 'source.txt'), 'operator change\n');
+    assert.throws(() => restoreManagedUpstreamPatch(dir), /operator changes/);
     git(['add', 'source.txt']);
+    assert.throws(() => restoreManagedUpstreamPatch(dir), /operator changes/);
     assert.throws(() => applyUpstreamPatch(dir, commit, patch), /other than/);
     assert.equal(readFileSync(join(dir, 'source.txt'), 'utf8'), 'operator change\n');
   } finally {

@@ -1,9 +1,28 @@
 import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-export function applyUpstreamPatch(upstream, commit, patchFile) {
+export function restoreManagedUpstreamPatch(upstream) {
+  const git = args => execFileSync('git', ['-C', upstream, ...args], { encoding: 'utf8' }).trim();
+  const receipt = git(['rev-parse', '--path-format=absolute', '--git-path', 'kitesurf-package-patch.json']);
+  if (!existsSync(receipt)) return;
+  const { commit, tree } = JSON.parse(readFileSync(receipt, 'utf8'));
+  if (!/^[a-f0-9]{40}$/.test(commit) || !/^[a-f0-9]{40}$/.test(tree) ||
+      git(['rev-parse', 'HEAD']) !== commit) throw new Error('Managed patch receipt does not match upstream');
+  // Restore only a recorded package-owned patch, never operator work or staged edits.
+  for (const args of [
+    ['diff', '--quiet', '--no-ext-diff', '--no-textconv', tree, '--'],
+    ['diff', '--cached', '--quiet', '--no-ext-diff', '--no-textconv', commit, '--'],
+  ]) {
+    const result = spawnSync('git', ['-C', upstream, ...args], { encoding: 'utf8' });
+    if (result.status !== 0) throw new Error('Managed upstream contains operator changes; preserving them');
+  }
+  git(['restore', '--source=' + commit, '--worktree', '--', '.']);
+  rmSync(receipt);
+}
+
+export function applyUpstreamPatch(upstream, commit, patchFile, { managed = false } = {}) {
   const git = (args, env) => execFileSync('git', ['-C', upstream, ...args], {
     encoding: 'utf8', env,
   }).trim();
@@ -32,6 +51,10 @@ export function applyUpstreamPatch(upstream, commit, patchFile) {
       throw new Error('Upstream has changes other than the exact reviewed package patch');
     }
     if (!matches(expected)) throw new Error('Package patch did not produce the expected upstream tree');
+    if (managed) {
+      const receipt = git(['rev-parse', '--path-format=absolute', '--git-path', 'kitesurf-package-patch.json']);
+      writeFileSync(receipt, JSON.stringify({ commit, tree: expected }) + '\n');
+    }
   } finally {
     rmSync(temp, { recursive: true, force: true });
   }

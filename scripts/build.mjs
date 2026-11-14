@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 import { cpSync, mkdirSync, readFileSync, readdirSync, writeFileSync, chmodSync, openSync, closeSync } from 'node:fs';
 import { join, relative, resolve } from 'node:path';
 
-import { applyUpstreamPatch } from './upstream-patch.mjs';
+import { applyUpstreamPatch, restoreManagedUpstreamPatch } from './upstream-patch.mjs';
 
 const root = resolve(import.meta.dirname, '..');
 const lock = JSON.parse(readFileSync(join(root, 'upstream.json')));
@@ -21,10 +21,11 @@ if (!take('--upstream')) {
   mkdirSync(join(root, '.cache'), { recursive: true });
   try { git(['rev-parse', '--git-dir']); }
   catch { run('git', ['clone', '--filter=blob:none', '--no-checkout', lock.repository, upstream], root); }
+  restoreManagedUpstreamPatch(upstream);
   run('git', ['checkout', '--detach', lock.commit]);
 }
 const patchFile = join(root, 'patches/compiled-browser-wasm.patch');
-applyUpstreamPatch(upstream, lock.commit, patchFile);
+applyUpstreamPatch(upstream, lock.commit, patchFile, { managed: !take('--upstream') });
 if (!args.includes('--skip-upstream-build')) {
   run('corepack', ['pnpm', 'install', '--frozen-lockfile']);
   run('corepack', ['pnpm', 'run', 'build']);
