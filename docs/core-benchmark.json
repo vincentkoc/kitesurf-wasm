@@ -1,0 +1,130 @@
+{
+  "scope": "Node component creation+evaluate+scan+terminate; not CDP browser speed",
+  "samples": [
+    {
+      "pair": 0,
+      "mode": "compile-each",
+      "wallMs": 196.7563,
+      "cpuMs": 308.567,
+      "rssBytes": 128249856
+    },
+    {
+      "pair": 0,
+      "mode": "cached",
+      "wallMs": 28.388211000000013,
+      "cpuMs": 38.769,
+      "rssBytes": 129191936
+    },
+    {
+      "pair": 1,
+      "mode": "cached",
+      "wallMs": 30.335071000000028,
+      "cpuMs": 40.887,
+      "rssBytes": 129585152
+    },
+    {
+      "pair": 1,
+      "mode": "compile-each",
+      "wallMs": 155.289353,
+      "cpuMs": 284.346,
+      "rssBytes": 185020416
+    },
+    {
+      "pair": 2,
+      "mode": "compile-each",
+      "wallMs": 130.147691,
+      "cpuMs": 244.026,
+      "rssBytes": 212074496
+    },
+    {
+      "pair": 2,
+      "mode": "cached",
+      "wallMs": 35.231079999999906,
+      "cpuMs": 39.619,
+      "rssBytes": 212492288
+    },
+    {
+      "pair": 3,
+      "mode": "cached",
+      "wallMs": 62.28269899999998,
+      "cpuMs": 71.049,
+      "rssBytes": 131805184
+    },
+    {
+      "pair": 3,
+      "mode": "compile-each",
+      "wallMs": 123.44595200000003,
+      "cpuMs": 223.659,
+      "rssBytes": 185823232
+    },
+    {
+      "pair": 4,
+      "mode": "compile-each",
+      "wallMs": 130.04143099999987,
+      "cpuMs": 253.115,
+      "rssBytes": 213008384
+    },
+    {
+      "pair": 4,
+      "mode": "cached",
+      "wallMs": 40.020039,
+      "cpuMs": 44.836,
+      "rssBytes": 213258240
+    },
+    {
+      "pair": 5,
+      "mode": "cached",
+      "wallMs": 26.753549999999905,
+      "cpuMs": 29.99,
+      "rssBytes": 213209088
+    },
+    {
+      "pair": 5,
+      "mode": "compile-each",
+      "wallMs": 80.32583700000009,
+      "cpuMs": 198.406,
+      "rssBytes": 213250048
+    },
+    {
+      "pair": 6,
+      "mode": "compile-each",
+      "wallMs": 75.56203600000003,
+      "cpuMs": 161.652,
+      "rssBytes": 213196800
+    },
+    {
+      "pair": 6,
+      "mode": "cached",
+      "wallMs": 30.10128899999995,
+      "cpuMs": 34.027,
+      "rssBytes": 213250048
+    },
+    {
+      "pair": 7,
+      "mode": "cached",
+      "wallMs": 24.103170999999975,
+      "cpuMs": 28.082,
+      "rssBytes": 213372928
+    },
+    {
+      "pair": 7,
+      "mode": "compile-each",
+      "wallMs": 98.57629900000006,
+      "cpuMs": 169.767,
+      "rssBytes": 240566272
+    }
+  ],
+  "summary": [
+    {
+      "mode": "compile-each",
+      "medianWallMs": 130.04143099999987,
+      "medianCpuMs": 244.026
+    },
+    {
+      "mode": "cached",
+      "medianWallMs": 30.335071000000028,
+      "medianCpuMs": 39.619
+    }
+  ],
+  "processPeakRssKiB": 242292
+}

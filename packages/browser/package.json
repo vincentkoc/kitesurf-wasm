@@ -1,0 +1,10 @@
+{
+  "name": "@vincentkoc/kitesurf-browser-local",
+  "version": "0.1.0",
+  "description": "Standalone workerd executable embedding the Kitesurf WASM browser",
+  "license": "Apache-2.0",
+  "files": ["bin/kitesurf", "LICENSE", "NOTICE", "licenses/", "README.md", "provenance.json"],
+  "os": ["linux"],
+  "cpu": ["x64"],
+  "repository": "github:vincentkoc/kitesurf-wasm"
+}

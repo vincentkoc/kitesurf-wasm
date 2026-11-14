@@ -1,0 +1,15 @@
+node_modules/
+.cache/
+build/
+artifacts/
+*.tgz
+packages/core/vendor/
+packages/core/provenance.json
+packages/core/LICENSE
+packages/core/NOTICE
+packages/core/licenses/
+packages/browser/bin/
+packages/browser/provenance*.json
+packages/browser/LICENSE
+packages/browser/NOTICE
+packages/browser/licenses/
