@@ -1,4 +1,4 @@
-# Browser WASM module sharing
+# Browser runtime patches
 
 `compiled-browser-wasm.patch` applies only to the upstream commit in `upstream.json`.
 The build checks that commit and accepts either a clean checkout or exactly this patch.
@@ -10,14 +10,22 @@ worker instead of reading and copying the raw WASM bytes for each load. workerd
 `extractWasmModuleContent` implementation in `src/workerd/api/worker-loader.c++`.
 
 Only immutable code is shared. Each worker still instantiates its own module with independent
-linear memory and page state. Anonymous worker creation, navigation teardown, compatibility
-flags, outbound restrictions, resource limits and CDP behavior stay unchanged.
+linear memory and page state. Anonymous worker creation, compatibility flags, outbound
+restrictions, resource limits and CDP behavior stay unchanged.
 
 The generated workerd configuration also sets `--no-flush-liftoff-code`. The pinned
 runtime otherwise sends moderate memory pressure when creating each isolate, which can
 flush baseline code from shared WASM modules and force compilation on every navigation.
 This stock V8 setting retains baseline code without disabling ordinary garbage collection
 or changing page isolation. Both production and fixture provenance record the setting.
+
+The patch also releases a page's RPC session capability after the existing one-second
+close grace even if the remote close never acknowledges. Normal close-before-kill ordering
+is preserved; a late acknowledgement does not dispose twice. Seven regressions cover hung
+close/kill, rejected kill, immediate kill, close alone, late settlement and late session arrival.
+CI runs all 28 adapter tests directly against the patched source in Node. This is a bounded
+cleanup correctness fix, not evidence that the remaining native-isolate retention or RSS
+growth is resolved; an in-flight remote call can retain references independently.
 
 The production smoke checks navigation-global isolation, concurrent-tab isolation, input,
 click handlers, rendering and tab closure. The corrected evaluator measures the remaining

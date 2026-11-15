@@ -18,6 +18,8 @@ jobs:
       - run: npm ci
       - run: corepack enable
       - run: npm run build
+      - name: Patched upstream RPC teardown regressions (Node adapter)
+        run: node scripts/test-upstream-rpc.mjs
       - run: npm test
       - run: npm run smoke:browser 2>&1 | tee browser-smoke.log
         shell: bash

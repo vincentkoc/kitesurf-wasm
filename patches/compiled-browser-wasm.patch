@@ -62,3 +62,178 @@ index 81e7f33..7ea26c5 100644
      "__ks_startup_probe_input.js": startupInputModule,
      "__ks_import_map.js": scriptBundle?.importMapModuleSource ?? FALLBACK_MODULE_RESOLVER_SOURCE,
    };
+diff --git a/packages/engine/src/eval/page-script-rpc-session.ts b/packages/engine/src/eval/page-script-rpc-session.ts
+--- a/packages/engine/src/eval/page-script-rpc-session.ts
++++ b/packages/engine/src/eval/page-script-rpc-session.ts
+@@ -339,10 +339,12 @@
+       const dispose = () => disposeStub(session);
+       if (typeof session.close === "function") {
+         try {
+-          return Promise.resolve(session.close()).then(dispose, (err: unknown) => {
++          const closing = Promise.resolve(session.close()).catch((err: unknown) => {
+             this.noteTransportDeath((err as Error)?.message ?? String(err));
+-            dispose();
+           });
++          // Release the capability after the grace even if the close RPC stays pending.
++          // A late acknowledgment must not dispose it a second time.
++          return settleTeardownWithin(closing).then(dispose);
+         } catch {
+           dispose();
+           return Promise.resolve();
+diff --git a/packages/engine/test/page-script-rpc-session.test.ts b/packages/engine/test/page-script-rpc-session.test.ts
+--- a/packages/engine/test/page-script-rpc-session.test.ts
++++ b/packages/engine/test/page-script-rpc-session.test.ts
+@@ -486,3 +486,153 @@
+     expect(fake.portsDisposed).toBe(1);
+   });
+ });
++
++describe("bounded RPC session disposal", () => {
++  it("disposes after the close grace even when close and kill stay pending", async () => {
++    vi.useFakeTimers();
++    try {
++      const fake = makeFake({ onClose: () => new Promise(() => {}) });
++      fake.entrypoint.killIsolate = () => new Promise(() => {});
++      const s = openPageScriptRpcSession(fake.entrypoint);
++      await s.syncCookies("warm=up");
++      s.close("generation bump");
++      const killing = s.killIsolate("generation bump");
++
++      await vi.advanceTimersByTimeAsync(999);
++      expect(fake.disposed).toBe(0);
++      await vi.advanceTimersByTimeAsync(1);
++      expect(fake.disposed).toBe(1);
++      await vi.advanceTimersByTimeAsync(1_000);
++      await killing;
++      expect(fake.disposed).toBe(1);
++    } finally {
++      vi.useRealTimers();
++    }
++  });
++
++  it("disposes a hung close even when kill rejects", async () => {
++    vi.useFakeTimers();
++    try {
++      const fake = makeFake({ onClose: () => new Promise(() => {}) });
++      fake.entrypoint.killIsolate = async () => {
++        throw new Error("kill failed");
++      };
++      const s = openPageScriptRpcSession(fake.entrypoint);
++      await s.syncCookies("warm=up");
++      s.close("generation bump");
++      const killing = s.killIsolate("generation bump");
++      await vi.advanceTimersByTimeAsync(1_000);
++      await killing;
++      expect(fake.disposed).toBe(1);
++    } finally {
++      vi.useRealTimers();
++    }
++  });
++
++  it("keeps disposal bounded when kill runs at once", async () => {
++    vi.useFakeTimers();
++    try {
++      let killed = false;
++      const fake = makeFake({ onClose: () => new Promise(() => {}) });
++      fake.entrypoint.killIsolate = async () => {
++        killed = true;
++      };
++      const s = openPageScriptRpcSession(fake.entrypoint);
++      await s.syncCookies("warm=up");
++      s.close("target closed");
++      const killing = s.killIsolate("target closed", { atOnce: true });
++      await vi.advanceTimersByTimeAsync(0);
++      await killing;
++      expect(killed).toBe(true);
++      await vi.advanceTimersByTimeAsync(1_000);
++      expect(fake.disposed).toBe(1);
++    } finally {
++      vi.useRealTimers();
++    }
++  });
++
++  it("disposes after the close grace without requiring a kill call", async () => {
++    vi.useFakeTimers();
++    try {
++      const fake = makeFake({ onClose: () => new Promise(() => {}) });
++      const s = openPageScriptRpcSession(fake.entrypoint);
++      await s.syncCookies("warm=up");
++      s.close("session close");
++      await vi.advanceTimersByTimeAsync(1_000);
++      expect(fake.disposed).toBe(1);
++      s.close("again");
++      expect(fake.disposed).toBe(1);
++    } finally {
++      vi.useRealTimers();
++    }
++  });
++
++  it.each(["resolve", "reject"] as const)(
++    "does not dispose twice when close settles late: %s",
++    async (settlement) => {
++      vi.useFakeTimers();
++      try {
++        let resolveClose = () => {};
++        let rejectClose = (_error: Error) => {};
++        const fake = makeFake({
++          onClose: () =>
++            new Promise<void>((resolve, reject) => {
++              resolveClose = resolve;
++              rejectClose = reject;
++            }),
++        });
++        const s = openPageScriptRpcSession(fake.entrypoint);
++        await s.syncCookies("warm=up");
++        s.close("generation bump");
++        await vi.advanceTimersByTimeAsync(1_000);
++        expect(fake.disposed).toBe(1);
++        if (settlement === "resolve") resolveClose();
++        else rejectClose(new Error("late close failure"));
++        await vi.advanceTimersByTimeAsync(0);
++        s.close("again");
++        expect(fake.disposed).toBe(1);
++      } finally {
++        vi.useRealTimers();
++      }
++    },
++  );
++
++  it("bounds disposal of a session that arrives after retirement", async () => {
++    vi.useFakeTimers();
++    try {
++      let resolveOpen = (_session: RpcSessionCallable) => {};
++      let closed = 0;
++      let disposed = 0;
++      const session: RpcSessionCallable = {
++        call: (async () => ({})) as RpcSessionCallable["call"],
++        makeRenderPort: async () => ({}) as RenderPortStub,
++        close: () => {
++          closed += 1;
++          return new Promise(() => {});
++        },
++        [Symbol.dispose]() {
++          disposed += 1;
++        },
++      };
++      const s = openPageScriptRpcSession({
++        openSession: () => new Promise((resolve) => (resolveOpen = resolve)),
++        killIsolate: async () => {},
++      });
++      s.close("generation bump");
++      const killing = s.killIsolate("generation bump");
++      await vi.advanceTimersByTimeAsync(2_000);
++      await killing;
++
++      resolveOpen(session);
++      await vi.advanceTimersByTimeAsync(999);
++      expect(closed).toBe(1);
++      expect(disposed).toBe(0);
++      await vi.advanceTimersByTimeAsync(1);
++      expect(disposed).toBe(1);
++      s.close("again");
++      expect(disposed).toBe(1);
++    } finally {
++      vi.useRealTimers();
++    }
++  });
++});
