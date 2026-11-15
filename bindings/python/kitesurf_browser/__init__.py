@@ -32,7 +32,14 @@ class Browser:
         url = urlsplit(endpoint)
         if url.scheme != "ws" or url.hostname not in ("127.0.0.1", "::1", "localhost") or url.username or url.password:
             raise ValueError("use an unauthenticated loopback ws:// endpoint")
-        return cls(websocket.create_connection(endpoint, timeout=timeout, http_no_proxy=["127.0.0.1", "localhost", "::1"]), timeout)
+        ws = websocket.create_connection(endpoint, timeout=timeout, redirect_limit=0,
+                                         http_no_proxy=["127.0.0.1", "localhost", "::1"])
+        # websocket-client 1.8 returns a connected object even for an unfollowed
+        # redirect. Never accept that object or follow a redirect off loopback.
+        if ws.getstatus() != 101:
+            ws.shutdown()
+            raise websocket.WebSocketException("expected HTTP 101; redirects are disabled")
+        return cls(ws, timeout)
 
     @classmethod
     def launch(cls, binary, *, port=18787, timeout=30):
@@ -86,28 +93,57 @@ class Browser:
             if session_id:
                 message["sessionId"] = session_id
             deadline = time.monotonic() + self.timeout
+            ws = self._ws
+
+            def abort():
+                # recv() handles control frames and partial reads internally;
+                # per-socket timeouts alone cannot impose a command deadline.
+                try:
+                    ws.abort()
+                except (OSError, AttributeError):
+                    pass  # The peer may already have closed the socket.
+
+            timer = threading.Timer(max(0, deadline - time.monotonic()), abort)
+            timer.daemon = True
             try:
-                self._ws.settimeout(self.timeout)
-                self._ws.send(json.dumps(message))
-                while True:
-                    remaining = deadline - time.monotonic()
-                    if remaining <= 0:
-                        raise TimeoutError(f"{method} timed out")
-                    self._ws.settimeout(remaining)
-                    response = json.loads(self._ws.recv())
-                    if response.get("id") != self._id:
-                        continue  # unsolicited events are not response frames
-                    if "error" in response:
-                        raise CDPError(method, response["error"])
-                    return response.get("result", {})
+                timer.start()
+                try:
+                    ws.settimeout(self.timeout)
+                    ws.send(json.dumps(message))
+                    while True:
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            raise TimeoutError(f"{method} timed out")
+                        ws.settimeout(remaining)
+                        response = json.loads(ws.recv())
+                        if time.monotonic() >= deadline:
+                            raise TimeoutError(f"{method} timed out")
+                        if response.get("id") != self._id:
+                            continue  # unsolicited events are not response frames
+                        break
+                finally:
+                    # Join before returning/cleanup so an old timer cannot abort
+                    # the next command or race with socket destruction.
+                    timer.cancel()
+                    timer.join()
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(f"{method} timed out")
+                if "error" in response:
+                    raise CDPError(method, response["error"])
+                return response.get("result", {})
             except CDPError:
                 raise
-            except websocket.WebSocketTimeoutException as error:
-                self.close()
-                raise TimeoutError(f"{method} timed out") from error
-            except BaseException:
-                # A late response must never be mistaken for a later command.
-                self.close()
+            except BaseException as error:
+                # Skip the graceful close handshake on a broken transport: it
+                # can itself be kept busy by a peer streaming partial frames.
+                try:
+                    ws.shutdown()
+                finally:
+                    self.close()
+                if isinstance(error, websocket.WebSocketTimeoutException) or (
+                    isinstance(error, Exception) and time.monotonic() >= deadline
+                ):
+                    raise TimeoutError(f"{method} timed out") from error
                 raise
 
     def new_page(self):

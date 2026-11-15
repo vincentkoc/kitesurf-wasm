@@ -8,6 +8,7 @@ has been published to a package registry.
 
 Use only trusted local pages. The unauthenticated CDP port stays on loopback;
 these clients intentionally reject non-loopback and authenticated endpoints.
+The Python client also refuses HTTP redirects during the WebSocket handshake.
 Do not expose the browser port through a public proxy or use the fixture binary
 for untrusted pages. See the root README for production/fixture differences.
 
@@ -63,18 +64,25 @@ import (
 )
 
 func main() {
+    if err := run(); err != nil {
+        log.Fatal(err) // run's deferred cleanup has already finished.
+    }
+}
+
+func run() error {
     ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
     defer cancel()
     browser, err := kitesurf.Launch(ctx, "/absolute/path/to/kitesurf", 18787, 10*time.Second)
-    if err != nil { log.Fatal(err) }
+    if err != nil { return err }
     defer browser.Close()
     page, err := browser.NewPage(ctx)
-    if err != nil { log.Fatal(err) }
+    if err != nil { return err }
     defer page.Close(context.Background())
-    if err := page.Navigate(ctx, "data:text/html,<title>Hello</title>"); err != nil { log.Fatal(err) }
+    if err := page.Navigate(ctx, "data:text/html,<title>Hello</title>"); err != nil { return err }
     var title string
-    if err := page.Evaluate(ctx, "document.title", &title); err != nil { log.Fatal(err) }
+    if err := page.Evaluate(ctx, "document.title", &title); err != nil { return err }
     fmt.Println(title)
+    return nil
 }
 ```
 
@@ -99,7 +107,9 @@ representation. It does not automatically await promises.
   another launcher on it. Browser stdout/stderr are discarded, not pipe-buffered;
   use an externally launched server when logs are required.
 - Commands have a finite timeout across all received frames, not a fresh timeout
-  per event. Transport failure or timeout closes the connection (and owned child)
+  per event, ping, fragment or partial read. Python uses a per-command abort
+  timer to interrupt blocking transport I/O and rejects responses past the deadline.
+  Transport failure or timeout closes the connection (and owned child)
   so a late response cannot contaminate later calls. Protocol/JavaScript errors
   do not close an otherwise healthy connection. Cleanup can add bounded time
   beyond a command's deadline.
