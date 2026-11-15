@@ -13,3 +13,8 @@ packages/browser/provenance*.json
 packages/browser/LICENSE
 packages/browser/NOTICE
 packages/browser/licenses/
+
+# Python binding build/test output
+__pycache__/
+*.egg-info/
+.venv/
