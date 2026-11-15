@@ -50,6 +50,13 @@ npm run build -- --upstream /path/to/kitesurf --skip-upstream-build --fixture
 
 The fixture variant permits outbound loopback and enables upstream's private-network flag. It is never packed in the production tarball. Do not use it for untrusted pages. Browser sessions are still per CDP connection and every navigation gets a new page isolate. Immutable compiled WASM code is shared, but linear memory, DOM and page globals are not.
 
+## Python and Go
+
+[Experimental Python and Go clients](docs/language-bindings.md) control the local
+standalone browser over CDP. They are not native WASM embeddings. Source installs,
+examples, deadlines, process ownership and smoke-test instructions are documented
+there; no Python or Go package is published automatically.
+
 ## Node component
 
 After building, or installing the core tarball into a project:
