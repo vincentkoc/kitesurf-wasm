@@ -47,10 +47,39 @@ func Connect(ctx context.Context, endpoint string, timeout time.Duration) (*Brow
 	if err != nil || u.Scheme != "ws" || u.User != nil || (u.Hostname() != "127.0.0.1" && u.Hostname() != "localhost" && u.Hostname() != "::1") {
 		return nil, errors.New("use an unauthenticated loopback ws:// endpoint")
 	}
-	dialer := websocket.Dialer{HandshakeTimeout: timeout}
-	conn, response, err := dialer.DialContext(ctx, endpoint, nil)
+	handshake, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	var stopInterrupt func() bool
+	interrupted := make(chan struct{})
+	dialer := websocket.Dialer{
+		NetDialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
+			conn, err := (&net.Dialer{}).DialContext(ctx, network, address)
+			if err != nil {
+				return nil, err
+			}
+			// Gorilla applies deadlines, but plain-ws handshake reads do not
+			// otherwise wake up when a context is canceled before its deadline.
+			stopInterrupt = context.AfterFunc(ctx, func() {
+				conn.Close()
+				close(interrupted)
+			})
+			return conn, nil
+		},
+	}
+	conn, response, err := dialer.DialContext(handshake, endpoint, nil)
+	// Disarm and join the callback before transferring connection ownership.
+	// A buffered upgrade may succeed even after cancellation closed the socket.
+	if stopInterrupt != nil && !stopInterrupt() {
+		<-interrupted
+	}
 	if response != nil && response.Body != nil {
 		response.Body.Close()
+	}
+	if contextErr := handshake.Err(); contextErr != nil {
+		if conn != nil {
+			conn.Close()
+		}
+		return nil, contextErr
 	}
 	if err != nil {
 		return nil, err
@@ -88,6 +117,11 @@ func Launch(ctx context.Context, binary string, port int, timeout time.Duration)
 		}
 		browser, dialErr := Connect(startup, "ws://"+address+"/devtools/browser", 250*time.Millisecond)
 		if dialErr == nil {
+			if err = startup.Err(); err != nil {
+				browser.Close()
+				stop(cmd, done)
+				return nil, err
+			}
 			select {
 			case err = <-done:
 				browser.Close()

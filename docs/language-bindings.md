@@ -119,7 +119,9 @@ representation. It does not automatically await promises.
   do not close an otherwise healthy connection. Cleanup can add bounded time
   beyond a command's deadline.
 - Go accepts a context for cancellation and uses the earlier of its deadline and
-  the configured timeout. Mutex acquisition itself is not context-aware. Calls
+  the configured timeout. Connection setup also closes pending handshake I/O on
+  cancellation and rejects late upgrade results before transferring ownership.
+  Mutex acquisition itself is not context-aware. Calls
   are serialized; do not race page close with page operations. Python serializes
   the connection with a reentrant lock and does not expose asynchronous cancellation.
 - `navigate`/`Navigate` returns the `Page.navigate` response, **not network idle**.

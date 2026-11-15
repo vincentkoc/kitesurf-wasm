@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httptrace"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -49,11 +50,15 @@ func TestProtocol(t *testing.T) {
 	}))
 	defer server.Close()
 	endpoint := "ws" + strings.TrimPrefix(server.URL, "http")
-	b, err := Connect(context.Background(), endpoint, time.Second)
+	connectCtx, cancelConnect := context.WithCancel(context.Background())
+	defer cancelConnect()
+	b, err := Connect(connectCtx, endpoint, time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer b.Close()
+	// The connect context owns only the handshake, not the returned browser.
+	cancelConnect()
 	var result struct{ Answer int }
 	if err = b.Command(context.Background(), "", "example", nil, &result); err != nil || result.Answer != 42 {
 		t.Fatalf("%+v %v", result, err)
@@ -99,6 +104,98 @@ func TestCancellation(t *testing.T) {
 		t.Fatalf("expected context cancellation: %v", err)
 	}
 }
+
+// Cancellation must interrupt plain-ws HTTP reads, not just TCP dialing or
+// handshakes whose peers eventually send a response.
+func TestConnectCancellationInterruptsHandshake(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	release := make(chan struct{})
+	finished := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer close(finished)
+		cancel()
+		<-release // Withhold the upgrade until Connect has handled cancellation.
+		c, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
+		if err == nil {
+			defer c.Close()
+			c.SetReadDeadline(time.Now().Add(time.Second))
+			c.ReadMessage()
+		}
+	}))
+	defer server.Close()
+	type result struct {
+		browser *Browser
+		err     error
+	}
+	returned := make(chan result, 1)
+	go func() {
+		b, err := Connect(ctx, "ws"+strings.TrimPrefix(server.URL, "http"), 3*time.Second)
+		if b != nil {
+			b.Close()
+		}
+		returned <- result{b, err}
+	}()
+	select {
+	case got := <-returned:
+		if got.browser != nil || !errors.Is(got.err, context.Canceled) {
+			t.Errorf("expected nil browser and cancellation, got %v, %v", got.browser, got.err)
+		}
+	case <-time.After(time.Second):
+		t.Error("cancellation did not interrupt the pending handshake")
+	}
+	close(release)
+	select {
+	case <-finished:
+	case <-time.After(2 * time.Second):
+		t.Fatal("peer did not finish after handshake cancellation")
+	}
+}
+
+func TestConnectRejectsLateHandshakeSuccess(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	observed := false
+	ctx = httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{
+		GotFirstResponseByte: func() {
+			// Gorilla can complete from buffered upgrade headers after this.
+			observed = true
+			cancel()
+		},
+	})
+	disconnected := make(chan error, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
+		if err != nil {
+			disconnected <- err
+			return
+		}
+		defer c.Close()
+		c.SetReadDeadline(time.Now().Add(time.Second))
+		_, _, err = c.ReadMessage()
+		disconnected <- err
+	}))
+	defer server.Close()
+	b, err := Connect(ctx, "ws"+strings.TrimPrefix(server.URL, "http"), time.Second)
+	if b != nil {
+		defer b.Close()
+	}
+	if !observed {
+		t.Fatal("did not reach the handshake response boundary")
+	}
+	if b != nil || !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected nil browser and cancellation, got %v, %v", b, err)
+	}
+	select {
+	case err := <-disconnected:
+		if timeout, ok := err.(net.Error); ok && timeout.Timeout() {
+			t.Fatal("late handshake transport was not closed")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("peer did not observe disconnect")
+	}
+}
+
 func freePort(t *testing.T) int {
 	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
