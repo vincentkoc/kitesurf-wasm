@@ -29,8 +29,10 @@ a complete measured run has passed and been reviewed.
   `waitpid` reports ECHILD. This is bounded to five seconds; missing/failed empty
   verification aborts the campaign before another process starts. Python 3 and
   Linux PR_SET_CHILD_SUBREAPER plus readable `/proc` are required.
-- Resource pass samples `/proc` process-tree RSS/PSS every 50ms and at operation
-  boundaries. RSS double-counts shared pages; PSS does not. Peak means *sampled*
+- Resource pass samples `/proc` for all descendants of the trial subreaper every
+  50ms and at operation boundaries, including live orphaned descendants adopted
+  after double-fork/setsid. The supervisor itself is excluded from RSS/PSS and CPU.
+  RSS double-counts shared pages; PSS does not. Peak means *sampled*
   peak for the workload batch, not per-page cost or exact maximum.
 - CPU sums observed self ticks per PID/start-time identity, retaining observed
   departed members. It misses unsampled exits and final increments and is
@@ -115,7 +117,8 @@ node --check scripts/browser-eval/run.mjs
 
 Tests use explicitly synthetic inputs to exercise reducers, guards, fixture
 oracles and deterministic SVG, plus fake Node launchers (including escaped
-setsid descendants) to verify bounded empty-containment cleanup. No browser launches. They are not publishable benchmark results.
+setsid descendants) to verify live adopted-descendant resource inclusion and
+bounded empty-containment cleanup. No browser launches. They are not publishable benchmark results.
 
 ## Hosted correctness-gated campaign
 

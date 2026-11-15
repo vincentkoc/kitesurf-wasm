@@ -39,7 +39,7 @@ const report={schema:1,status:'running',started:new Date().toISOString(),fixture
     'Warm means the same process after warmups, but a fresh document on every operation; no page/isolate pooling.',
     'Each workload and measurement pass has a separate engine process; trials rotate engine order. No parallel execution.',
     'Latency excludes process-tree scans. Resource pass is separately instrumented at 50ms plus operation boundaries.',
-    'RSS sums process-tree resident sets (shared pages double-count); PSS is reported separately. Sampled peak is not true peak.',
+    'RSS/PSS and CPU sample all supervisor descendants, including adopted orphans, but exclude the supervisor itself. RSS double-counts shared pages; sampled peak is not true peak.',
     'CPU is observed quantized process self ticks, not total CPU or a bound. Quantization can overcount; missed exits/final increments can undercount.',
     'Workload wall clock includes CDP navigation, actions and assertions. No rendering, real websites or network-speed claim.',
     'Any correctness, resource completeness, launch or cleanup failure invalidates the comparison; failures are retained, never wins.'
@@ -59,7 +59,7 @@ async function run(engine,workload,phase,pass,trial,base){
   assert(!interrupted,'Evaluation interrupted');
   const row={engine:engine.id,workload,phase,pass,trial,status:'running',wallMs:[],started:new Date().toISOString(),loadBefore:os.loadavg()}; report.runs.push(row); await save();
   const profile=await fs.mkdtemp('/tmp/browser-eval-');
-  let child,browser,containment,rootPid,polling=false,poller;
+  let child,browser,containment,rootPid,supervisorPid,polling=false,poller;
   try{
     const port=await freePort();
     const args=engine.id==='kitesurf'?['--experimental',`--socket-addr=http=127.0.0.1:${port}`]:engine.id==='lightpanda'?['serve','--host','127.0.0.1','--port',String(port)]:['--headless=new','--disable-gpu','--no-sandbox','--disable-dev-shm-usage','--no-first-run','--no-default-browser-check','--disable-sync','--disable-background-networking','--disable-component-update','--no-proxy-server',`--user-data-dir=${profile}`,`--remote-debugging-port=${port}`];
@@ -69,6 +69,7 @@ async function run(engine,workload,phase,pass,trial,base){
     child=active=containment.child;
     child.on('error',e=>spawnError=e);child.stderr.on('data',x=>{stderr=(stderr+x).slice(-8000);row.stderr=stderr;});
     rootPid=await containment.ready;row.rootPid=rootPid;
+    supervisorPid=child.pid;row.supervisorPid=supervisorPid;
     let ready=false;
     for(let i=0;i<150;i++){
       if(spawnError)throw spawnError;
@@ -83,12 +84,12 @@ async function run(engine,workload,phase,pass,trial,base){
     const n=phase==='cold'?1:repetitions;
     let stats;
     if(pass==='resources'){
-      const first=await snapshot(rootPid); stats=accumulator(first,hz);stats.add(first);polling=true;
-      poller=(async()=>{while(polling){await delay(50);if(polling)stats.add(await snapshot(rootPid));}})();
+      const first=await snapshot(supervisorPid); stats=accumulator(first,hz);stats.add(first);polling=true;
+      poller=(async()=>{while(polling){await delay(50);if(polling)stats.add(await snapshot(supervisorPid));}})();
     }
     for(let i=0;i<n;i++){
       const t=performance.now();await operation(page,base,workload);row.wallMs.push(performance.now()-t);
-      if(stats)stats.add(await snapshot(rootPid));
+      if(stats)stats.add(await snapshot(supervisorPid));
     }
     polling=false;if(poller)await poller;
     if(stats){row.resources=stats.result(n);assert(row.resources.complete,'Incomplete process-tree sample');}
