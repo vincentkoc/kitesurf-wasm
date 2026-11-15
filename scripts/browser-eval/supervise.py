@@ -37,8 +37,14 @@ def main():
         raise OSError(ctypes.get_errno(), "PR_SET_CHILD_SUBREAPER failed")
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
-    child = subprocess.Popen(sys.argv[1:], stdin=subprocess.DEVNULL,
-                             stdout=subprocess.DEVNULL, start_new_session=True)
+    args = sys.argv[1:]
+    stdout = subprocess.DEVNULL
+    if args[:1] == ['--stdout-fd']:
+        # Node owns and drains this dedicated pipe; fd 1 stays JSON control only.
+        stdout = int(args[1])
+        args = args[2:]
+    child = subprocess.Popen(args, stdin=subprocess.DEVNULL,
+                             stdout=stdout, start_new_session=True)
     print(json.dumps({"rootPid": child.pid}), flush=True)
     # Do not reap while the workload runs: retain the root's identity until cleanup.
     while not stopping:

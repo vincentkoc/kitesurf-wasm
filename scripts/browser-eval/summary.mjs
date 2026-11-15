@@ -4,7 +4,7 @@ import * as fs from 'node:fs/promises';
 import {pathToFileURL} from 'node:url';
 export const median = xs => {const x=[...xs].sort((a,b)=>a-b),m=Math.floor(x.length/2);assert(x.length,'Empty samples');return x.length%2?x[m]:(x[m-1]+x[m])/2;};
 export function summarize(report) {
-  assert.equal(report.schema,1);assert.equal(report.status,'passed','Cannot chart a failed/incomplete experiment');
+  assert.equal(report.schema,1);assert(!report.diagnosticOnly,'Diagnostic trace timings cannot be charted as performance results');assert.equal(report.status,'passed','Cannot chart a failed/incomplete experiment');
   const {trials,repetitions}= {trials:5,repetitions:10,...report.config};
   assert(trials>=3);assert.equal(report.runs.length,trials*3*3*2*2,'Missing or extra trial rows');
   assert.deepEqual(report.engineIdentity.map(x=>x.id).sort(),['chromium','kitesurf','lightpanda']);

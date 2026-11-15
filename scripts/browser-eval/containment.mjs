@@ -3,9 +3,9 @@ import {spawn} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
 import {createInterface} from 'node:readline';
 
-export function launch(binary,args,env=process.env) {
-  const child=spawn('python3',[fileURLToPath(new URL('./supervise.py',import.meta.url)),binary,...args],{
-    stdio:['ignore','pipe','pipe'],detached:true,env,
+export function launch(binary,args,env=process.env,{captureStdout=false}={}) {
+  const child=spawn('python3',[fileURLToPath(new URL('./supervise.py',import.meta.url)),...(captureStdout?['--stdout-fd','3']:[]),binary,...args],{
+    stdio:['ignore','pipe','pipe',...(captureStdout?['pipe']:[])],detached:true,env,
   });
   const messages=[];
   let resolveReady,rejectReady,spawnError;
@@ -21,7 +21,7 @@ export function launch(binary,args,env=process.env) {
   });
   // A launch failure can precede awaiting readiness, but is still reported there.
   ready.catch(()=>{});
-  return {child,ready,exited,messages,
+  return {child,ready,exited,messages,stdout:captureStdout?child.stdio[3]:null,
     async stop() {
       if(child.exitCode===null&&!child.signalCode&&!spawnError)child.kill('SIGTERM');
       let timer;

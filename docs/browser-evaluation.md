@@ -142,3 +142,52 @@ shared libraries. It does not make the runner dedicated or eliminate host/order 
 Read the individual run hashes, versions and host-load observations before comparing results.
 The historical OpenClaw workflow results and these direct-CDP measurements are different
 workloads and must not be combined into one speedup claim.
+
+
+## Opt-in failure tracing
+
+Set `BROWSER_EVAL_TRACE_DIR` to retain diagnostic sidecars for the correctness-gated
+`scripts/browser-eval/run.mjs` campaign. For example, after building and preparing its
+configuration through the normal workflow:
+
+```sh
+BROWSER_EVAL_TRACE_DIR=artifacts/browser-eval/trace \
+  node scripts/browser-eval/run.mjs --config artifacts/browser-eval/config.json \
+  --output artifacts/browser-eval/raw.json --measurement-window-reserved
+```
+
+The output has `diagnosticOnly: true`. Tracing changes timing and allocation overhead;
+these rows are diagnostic observations, not a performance-qualified comparison. The
+summary tool refuses diagnostic reports, and trace-enabled CI skips summary charts.
+When the variable is absent, no trace files or observer method wrappers are created.
+A trace directory cannot reuse an existing row directory or overwrite earlier evidence.
+
+Each row retains:
+
+- `events.jsonl`: row identity, UTC/monotonic timestamps, warmup/measured operation index,
+  method start/end/error markers, and raw Puppeteer CDP requests, replies and events.
+  Request, session, frame and loader IDs are preserved. The built-in logger API is
+  tested against pinned Puppeteer 25.16.0; no extra CDP commands or `cdpDebug` flag are sent.
+- `stdout.log` and `stderr.log`: full engine output through monitored Node streams (stdout uses a
+  dedicated pipe), separately from the supervisor's JSON control channel and the existing raw-row stderr tail.
+- `manifest.json`: complete/incomplete trace status. Stream errors fail the campaign;
+  queued writes flush only at the row boundary, never through awaited writes inside
+  a fixture operation. Stdout backpressure is honored; after a sink error, its pipe
+  is drained/discarded to avoid blocking the engine, and the trace cannot pass.
+  Row-boundary flushing has its own five-second diagnostic budget; a stalled sink
+  fails as incomplete without widening any engine/navigation deadline. An engine assertion failure can have a complete trace while
+  the row and campaign correctly remain failed.
+
+On failure only, the trace adds Linux pressure, memory, process-tree resource/state and
+wait-channel observations before containment cleanup. Missing OS data is recorded as
+unavailable, not inferred. No pressure or process scans are added to latency operations.
+The fixture function, trusted type/click actions, isolation/result assertions and
+15-second navigation/protocol deadlines remain unchanged. A failed row aborts the
+campaign, and every row still requires the original subreaper cleanup verification.
+
+CI currently enables this observer for the full five-trial campaign. Trace sidecars
+remain in the existing always-uploaded `kitesurf-linux-x64` artifact. A separate
+always-uploaded `kitesurf-browser-eval-replay` artifact retains the exact fixture binary,
+fixture provenance, upstream manifest and checksums, including after campaign failure.
+It is test-only replay evidence, never part of either production npm tarball. A build
+that fails before producing a fixture cannot provide an exact binary for replay.

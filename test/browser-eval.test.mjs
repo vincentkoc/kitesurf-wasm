@@ -17,6 +17,7 @@ test('summary is balanced, median of trial medians, deterministic',()=>{
 });
 test('failed, missing, duplicate and invalid rows never become wins',()=>{
   let r=synthetic();r.status='failed';assert.throws(()=>summarize(r));
+  r=synthetic();r.diagnosticOnly=true;assert.throws(()=>summarize(r),/Diagnostic trace timings/);
   r=synthetic();r.runs.pop();assert.throws(()=>summarize(r));
   r=synthetic();r.runs[0].status='failed';assert.throws(()=>summarize(r));
   r=synthetic();r.runs[0].wallMs=[NaN];assert.throws(()=>summarize(r));

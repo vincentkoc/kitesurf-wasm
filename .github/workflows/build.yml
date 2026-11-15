@@ -68,18 +68,23 @@ jobs:
           });
           writeFileSync('artifacts/browser-eval/config.json', JSON.stringify({trials:5,warmups:2,repetitions:10,engines},null,2)+'\n',{flag:'wx'});
           JS
-      - name: Five-trial correctness-gated browser workloads
+      - name: Five-trial correctness-gated browser workloads (diagnostic trace)
+        env:
+          BROWSER_EVAL_TRACE_DIR: artifacts/browser-eval/trace
         shell: bash
         timeout-minutes: 30
         run: |
           # Serial on one hosted runner, not an exclusive performance-qualified host.
           node scripts/browser-eval/run.mjs --config artifacts/browser-eval/config.json --output artifacts/browser-eval/raw.json --measurement-window-reserved
-          node scripts/browser-eval/summary.mjs artifacts/browser-eval/raw.json artifacts/browser-eval/summary.json
-          for workload in navigation interaction javascript; do
-            for phase in cold warm; do
-              EVAL_PYTHON=build/eval-render/bin/python node scripts/browser-eval/chart.mjs artifacts/browser-eval/summary.json "$workload" "$phase" "artifacts/browser-eval/$workload-$phase"
+          # Trace overhead is diagnostic, never a scored performance comparison.
+          if [ -z "${BROWSER_EVAL_TRACE_DIR:-}" ]; then
+            node scripts/browser-eval/summary.mjs artifacts/browser-eval/raw.json artifacts/browser-eval/summary.json
+            for workload in navigation interaction javascript; do
+              for phase in cold warm; do
+                EVAL_PYTHON=build/eval-render/bin/python node scripts/browser-eval/chart.mjs artifacts/browser-eval/summary.json "$workload" "$phase" "artifacts/browser-eval/$workload-$phase"
+              done
             done
-          done
+          fi
       - name: Corrected three-browser comparison
         shell: bash
         run: |
@@ -98,6 +103,21 @@ jobs:
               fi
             done
           done
+      - name: Retain exact diagnostic fixture (not an npm package)
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p build/browser-eval-replay
+          for file in packages/browser/bin/kitesurf-fixture packages/browser/provenance-fixture.json upstream.json; do
+            if [ -f "$file" ]; then cp "$file" build/browser-eval-replay/; fi
+          done
+          (cd build/browser-eval-replay && find . -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 -r sha256sum > SHA256SUMS)
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: kitesurf-browser-eval-replay
+          path: build/browser-eval-replay/
+          if-no-files-found: error
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
