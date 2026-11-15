@@ -17,15 +17,16 @@ from kitesurf_browser import Browser, CDPError
 
 class LocalPeer:
     """A single local HTTP/WebSocket peer; no external server dependency."""
-    def __init__(self, handler, *, redirect=None):
-        self.handler, self.redirect = handler, redirect
+    def __init__(self, handler, *, redirect=None, handshake=None, port=0, host="127.0.0.1"):
+        self.handler, self.redirect, self.handshake = handler, redirect, handshake
         self.finished = threading.Event()
         self.errors = []
-        self.listener = socket.socket()
-        self.listener.bind(('127.0.0.1', 0))
+        self.listener = socket.socket(socket.AF_INET6 if ":" in host else socket.AF_INET)
+        self.listener.bind((host, port))
         self.listener.listen(1)
         self.listener.settimeout(2)
-        self.endpoint = f'ws://127.0.0.1:{self.listener.getsockname()[1]}/'
+        authority = f'[{host}]' if ':' in host else host
+        self.endpoint = f'ws://{authority}:{self.listener.getsockname()[1]}/'
         self.connection = None
         self.thread = threading.Thread(target=self.serve)
 
@@ -48,11 +49,16 @@ class LocalPeer:
                 headers = dict(line.split(': ', 1) for line in request.decode().split('\r\n')[1:] if ': ' in line)
                 key = headers['Sec-WebSocket-Key'] + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11'
                 accept = base64.b64encode(hashlib.sha1(key.encode()).digest()).decode()
-                connection.sendall(('HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n'
-                                    'Connection: Upgrade\r\nSec-WebSocket-Accept: ' + accept + '\r\n\r\n').encode())
+                response = ('HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n'
+                            'Connection: Upgrade\r\nSec-WebSocket-Accept: ' + accept + '\r\n\r\n').encode()
+                if self.handshake:
+                    self.handshake(connection, response)
+                else:
+                    connection.sendall(response)
                 peer = websocket.WebSocket()
                 peer.sock, peer.connected = connection, True
-                self.handler(connection, peer)
+                if self.handler:
+                    self.handler(connection, peer)
         except (OSError, websocket.WebSocketConnectionClosedException):
             pass  # Expected when the client aborts a pending command.
         except BaseException as error:
@@ -96,7 +102,7 @@ class ProtocolTest(unittest.TestCase):
         self.assertEqual(caught.exception.error['code'], -32601)
         browser.close()
         browser.close()
-        ws.close.assert_called_once()
+        ws.shutdown.assert_called_once()
         with self.assertRaises(RuntimeError):
             browser.command('example')
 
@@ -106,7 +112,7 @@ class ProtocolTest(unittest.TestCase):
         browser = Browser(ws, 0.01)
         with self.assertRaises(TimeoutError):
             browser.command('hang')
-        ws.close.assert_called_once()
+        ws.shutdown.assert_called_once()
 
     def test_reject_remote_and_invalid_timeouts(self):
         with self.assertRaises(ValueError):
@@ -114,6 +120,25 @@ class ProtocolTest(unittest.TestCase):
         for timeout in (0, -1, float('nan'), float('inf')):
             with self.assertRaises(ValueError):
                 Browser.connect(timeout=timeout)
+
+    def test_localhost_uses_loopback_socket(self):
+        with LocalPeer(lambda connection, peer: connection.recv(1)) as server:
+            with Browser.connect(server.endpoint.replace('127.0.0.1', 'localhost'), timeout=1):
+                pass
+            self.assertTrue(server.finished.wait(0.5))
+
+    @unittest.skipUnless(socket.has_ipv6, 'IPv6 unavailable')
+    def test_ipv6_and_localhost_fallback(self):
+        for host in ('[::1]', 'localhost'):
+            with self.subTest(host=host):
+                try:
+                    server = LocalPeer(lambda connection, peer: connection.recv(1), host='::1')
+                except OSError as error:
+                    self.skipTest(f'IPv6 loopback unavailable: {error}')
+                with server:
+                    with Browser.connect(server.endpoint.replace('[::1]', host), timeout=1):
+                        pass
+                    self.assertTrue(server.finished.wait(0.5))
 
     def test_redirect_off_loopback_is_not_followed(self):
         from websocket import _http
@@ -132,6 +157,111 @@ class ProtocolTest(unittest.TestCase):
                     Browser.connect(server.endpoint)
             self.assertEqual(destinations, [server.endpoint])
             self.assertTrue(server.finished.wait(1))
+
+    def test_close_does_not_wait_for_partial_frame(self):
+        sending = threading.Event()
+
+        def handle(connection, peer):
+            connection.sendall(frame('x' * 1000)[:4])
+            sending.set()
+            for _ in range(150):
+                connection.sendall(b'x')
+                time.sleep(0.01)
+
+        with LocalPeer(handle) as server:
+            browser = Browser.connect(server.endpoint, timeout=1)
+            process = Mock()
+            process.poll.return_value = None
+            browser._process = process
+            self.assertTrue(sending.wait(1))
+            start = time.monotonic()
+            browser.close()
+            self.assertLess(time.monotonic() - start, 0.3)
+            self.assertIsNone(browser._ws)
+            self.assertIsNone(browser._process)
+            process.terminate.assert_called_once()
+            process.wait.assert_called_once()
+            self.assertTrue(server.finished.wait(0.5), 'peer did not observe disconnect')
+            browser.close()
+
+    @staticmethod
+    def trickle_handshake(connection, response):
+        for byte in response:
+            connection.sendall(bytes([byte]))
+            time.sleep(0.005)
+
+    def test_handshake_has_absolute_deadline(self):
+        with LocalPeer(None, handshake=self.trickle_handshake) as server:
+            start = time.monotonic()
+            with self.assertRaises(TimeoutError):
+                Browser.connect(server.endpoint, timeout=0.05)
+            self.assertLess(time.monotonic() - start, 0.3)
+            self.assertTrue(server.finished.wait(0.5), 'handshake socket was not closed')
+
+    def test_late_handshake_success_is_rejected(self):
+        original_connect = websocket.WebSocket.connect
+        connections = []
+
+        def late_connect(ws, *args, **kwargs):
+            original_connect(ws, *args, **kwargs)
+            connections.append(ws)
+            time.sleep(0.1)  # Model work returning after its transport was aborted.
+
+        with LocalPeer(lambda connection, peer: connection.recv(1)) as server:
+            with patch.object(websocket.WebSocket, 'connect', late_connect):
+                with self.assertRaises(TimeoutError):
+                    Browser.connect(server.endpoint, timeout=0.05)
+            self.assertEqual(len(connections), 1)
+            self.assertIsNone(connections[0].sock)
+            self.assertTrue(server.finished.wait(0.5))
+
+    def test_startup_trickle_handshake_reaps_child(self):
+        with socket.socket() as probe:
+            probe.bind(('127.0.0.1', 0))
+            port = probe.getsockname()[1]
+        process = Mock()
+        process.poll.return_value = None
+        servers = []
+
+        def start_process(*args, **kwargs):
+            server = LocalPeer(None, handshake=self.trickle_handshake, port=port)
+            servers.append(server)
+            server.__enter__()
+            return process
+
+        try:
+            with patch('kitesurf_browser.subprocess.Popen', side_effect=start_process):
+                start = time.monotonic()
+                with self.assertRaises(TimeoutError):
+                    Browser.launch('unused-test-binary', port=port, timeout=0.05)
+                self.assertLess(time.monotonic() - start, 0.3)
+                process.terminate.assert_called_once()
+                process.wait.assert_called_once()
+                self.assertTrue(servers[0].finished.wait(0.5))
+        finally:
+            for server in servers:
+                server.__exit__(None, None, None)
+
+    def test_startup_rejects_late_connect_result(self):
+        with socket.socket() as probe:
+            probe.bind(('127.0.0.1', 0))
+            port = probe.getsockname()[1]
+        process = Mock()
+        process.poll.return_value = None
+        ws = Mock()
+        browser = Browser(ws, 1)
+
+        def late_connect(*args, **kwargs):
+            time.sleep(0.06)
+            return browser
+
+        with patch('kitesurf_browser.subprocess.Popen', return_value=process):
+            with patch.object(Browser, 'connect', side_effect=late_connect):
+                with self.assertRaises(TimeoutError):
+                    Browser.launch('unused-test-binary', port=port, timeout=0.02)
+        self.assertIsNone(browser._ws)
+        process.terminate.assert_called_once()
+        process.wait.assert_called_once()
 
     def test_absolute_deadline_for_control_fragments_and_partial_reads(self):
         for mode in ('ping', 'fragment', 'partial_header', 'partial_payload'):

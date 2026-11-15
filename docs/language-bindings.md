@@ -101,6 +101,11 @@ representation. It does not automatically await promises.
   Neither sends `Browser.close` to an externally owned server. Python allows
   two seconds after termination before killing the child; Go kills and reaps
   the direct child immediately.
+- Python disconnects by immediately shutting down the transport, without waiting
+  for a WebSocket close handshake that a trickling peer could prolong.
+- Python connection setup uses an absolute deadline across TCP attempts and the
+  HTTP handshake. A timer aborts partial-header reads, and late handshake/startup
+  results are rejected. `localhost` dials only numeric IPv4/IPv6 loopback addresses.
 - Startup failure cleans up a successfully launched process. Launch checks the
   selected port before spawning; like any check-then-bind API it cannot reserve
   that port atomically for the child. Use a private, unused port and do not race

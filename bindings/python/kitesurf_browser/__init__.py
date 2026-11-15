@@ -32,14 +32,63 @@ class Browser:
         url = urlsplit(endpoint)
         if url.scheme != "ws" or url.hostname not in ("127.0.0.1", "::1", "localhost") or url.username or url.password:
             raise ValueError("use an unauthenticated loopback ws:// endpoint")
-        ws = websocket.create_connection(endpoint, timeout=timeout, redirect_limit=0,
-                                         http_no_proxy=["127.0.0.1", "localhost", "::1"])
-        # websocket-client 1.8 returns a connected object even for an unfollowed
-        # redirect. Never accept that object or follow a redirect off loopback.
-        if ws.getstatus() != 101:
-            ws.shutdown()
-            raise websocket.WebSocketException("expected HTTP 101; redirects are disabled")
-        return cls(ws, timeout)
+        deadline = time.monotonic() + timeout
+        # Own the TCP socket before starting the HTTP handshake so it can be
+        # interrupted even before websocket-client marks itself connected.
+        # Resolve localhost ourselves: only numeric loopback addresses may be
+        # dialled, with one shared budget across IPv4 and IPv6 attempts.
+        hosts = ("127.0.0.1", "::1") if url.hostname == "localhost" else (url.hostname,)
+        for index, host in enumerate(hosts):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("browser connection timed out")
+            sock = socket.socket(socket.AF_INET6 if ":" in host else socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(remaining)
+            try:
+                sock.connect((host, url.port or 80))
+                break
+            except BaseException as error:
+                sock.close()
+                if not isinstance(error, OSError) or index == len(hosts) - 1:
+                    raise
+
+        ws = websocket.WebSocket()
+
+        def abort():
+            # ws.abort() is a no-op during the handshake (connected is false).
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass  # The handshake may already have closed the socket.
+
+        timer = threading.Timer(max(0, deadline - time.monotonic()), abort)
+        timer.daemon = True
+        try:
+            timer.start()
+            try:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError("browser connection timed out")
+                sock.settimeout(remaining)
+                ws.connect(endpoint, socket=sock, timeout=remaining, redirect_limit=0,
+                           http_no_proxy=["127.0.0.1", "localhost", "::1"])
+            finally:
+                timer.cancel()
+                timer.join()
+            if time.monotonic() >= deadline:
+                raise TimeoutError("browser connection timed out")
+            # websocket-client 1.8 accepts unfollowed redirects as connected.
+            if ws.getstatus() != 101:
+                raise websocket.WebSocketException("expected HTTP 101; redirects are disabled")
+            return cls(ws, timeout)
+        except BaseException as error:
+            try:
+                ws.shutdown()
+            finally:
+                sock.close()
+            if isinstance(error, Exception) and time.monotonic() >= deadline:
+                raise TimeoutError("browser connection timed out") from error
+            raise
 
     @classmethod
     def launch(cls, binary, *, port=18787, timeout=30):
@@ -62,13 +111,16 @@ class Browser:
                     break
                 try:
                     browser = cls.connect(f"ws://127.0.0.1:{port}/devtools/browser", timeout=min(0.25, remaining))
+                    if time.monotonic() >= deadline:
+                        browser.close()
+                        raise TimeoutError("browser startup timed out")
                     if process.poll() is not None:
                         browser.close()
                         raise RuntimeError("browser exited during startup")
                     browser.timeout, browser._process = timeout, process
                     return browser
                 except (OSError, websocket.WebSocketException):
-                    time.sleep(0.02)
+                    time.sleep(min(0.02, max(0, deadline - time.monotonic())))
             raise TimeoutError("browser startup timed out")
         except BaseException:
             cls._stop(process)
@@ -136,10 +188,7 @@ class Browser:
             except BaseException as error:
                 # Skip the graceful close handshake on a broken transport: it
                 # can itself be kept busy by a peer streaming partial frames.
-                try:
-                    ws.shutdown()
-                finally:
-                    self.close()
+                self.close()
                 if isinstance(error, websocket.WebSocketTimeoutException) or (
                     isinstance(error, Exception) and time.monotonic() >= deadline
                 ):
@@ -161,7 +210,8 @@ class Browser:
             ws, self._ws = self._ws, None
             try:
                 if ws is not None:
-                    ws.close(timeout=1)
+                    # No graceful read: partial frames can keep it alive forever.
+                    ws.shutdown()
             finally:
                 if self._process is not None:
                     self._stop(self._process)
