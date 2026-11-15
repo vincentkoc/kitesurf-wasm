@@ -10,12 +10,14 @@ import { parseArgs } from 'node:util';
 import { setTimeout as delay } from 'node:timers/promises';
 import { execFileSync } from 'node:child_process';
 import puppeteer from 'puppeteer-core';
+import { executableAnonymousRssKiB } from './code-memory.mjs';
 
 const { values } = parseArgs({ options: {
   engine: { type: 'string' }, binary: { type: 'string' }, output: { type: 'string' },
   iterations: { type: 'string', default: '10' },
   mode: { type: 'string', default: 'latency' },
   config: { type: 'string' },
+  'max-code-mib': { type: 'string' },
 } });
 assert(['chromium', 'lightpanda', 'kitesurf'].includes(values.engine), '--engine chromium|lightpanda|kitesurf');
 assert(['latency', 'lifecycle'].includes(values.mode), '--mode latency|lifecycle');
@@ -23,6 +25,12 @@ assert(values.binary && values.output, '--binary and --output required');
 assert(!values.config || values.engine === 'kitesurf', '--config is for uncompiled workerd only');
 const iterations = Number(values.iterations);
 assert(Number.isInteger(iterations) && iterations >= 3 && iterations <= 100, '--iterations 3..100');
+const maxCodeMiB = values['max-code-mib'] === undefined ? null : Number(values['max-code-mib']);
+if (maxCodeMiB !== null) {
+  assert(process.platform === 'linux' && values.engine === 'kitesurf' && values.mode === 'lifecycle',
+    '--max-code-mib requires a Linux Kitesurf lifecycle run');
+  assert(Number.isFinite(maxCodeMiB) && maxCodeMiB > 0, '--max-code-mib must be positive');
+}
 const binary = resolve(values.binary);
 const output = resolve(values.output);
 await fs.access(binary);
@@ -102,7 +110,7 @@ const report = {
   fixtureSha256: createHash('sha256').update(html).digest('hex'),
   configSha256: values.config ? createHash('sha256').update(await fs.readFile(resolve(values.config))).digest('hex') : null,
   node: process.version, platform: process.platform, arch: process.arch,
-  hostLoad: os.loadavg(), iterations, memoryCurve: [],
+  hostLoad: os.loadavg(), iterations, maxCodeMiB, memoryCurve: [],
   notes: [
     'Latency and lifecycle runs are separate. No memory traversal, proxy, OpenClaw routes, tracing or forced GC inside latency batches.',
     'Repeated navigation creates a fresh document; same-document JS measures a different workload and is reported separately.',
@@ -111,7 +119,21 @@ const report = {
     'Forced GC is deliberately absent: normal runtime behavior is the subject of this test.',
   ],
 };
-async function checkpoint(stage) { report.memoryCurve.push({ stage, ...await resources(child.pid) }); }
+async function checkpoint(stage) {
+  const usage = await resources(child.pid);
+  const sample = { stage, ...usage };
+  report.memoryCurve.push(sample);
+  if (maxCodeMiB !== null) {
+    assert(usage?.complete, 'Complete process-tree memory sample required for code limit');
+    let codeKiB = 0;
+    for (const member of usage.members) {
+      codeKiB += executableAnonymousRssKiB(await fs.readFile('/proc/' + member.pid + '/smaps', 'utf8'));
+    }
+    sample.executableAnonymousMiB = codeKiB / 1024;
+    assert(sample.executableAnonymousMiB <= maxCodeMiB,
+      `Executable anonymous RSS at ${stage}: ${sample.executableAnonymousMiB.toFixed(1)} MiB exceeds ${maxCodeMiB} MiB`);
+  }
+}
 try {
   const fixturePort = await listen(fixture);
   const url = 'http://127.0.0.1:' + fixturePort + '/';
