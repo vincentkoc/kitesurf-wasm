@@ -6,7 +6,7 @@ It refuses unrelated tracked changes. The browser provenance records the patch S
 
 The patch passes the engine's imported `WebAssembly.Module` to each new page and renderer
 worker instead of reading and copying the raw WASM bytes for each load. workerd
-1.20260911.1 supports this input and shares the compiled code through its
+supports this input and shares the compiled code through its
 `extractWasmModuleContent` implementation in `src/workerd/api/worker-loader.c++`.
 
 Only immutable code is shared. Each worker still instantiates its own module with independent
@@ -18,6 +18,14 @@ runtime otherwise sends moderate memory pressure when creating each isolate, whi
 flush baseline code from shared WASM modules and force compilation on every navigation.
 This stock V8 setting retains baseline code without disabling ordinary garbage collection
 or changing page isolation. Both production and fixture provenance record the setting.
+
+The compiler is pinned to workerd 1.20260929.1. This official release includes the
+V8 correction from [workerd PR #7554](https://github.com/cloudflare/workerd/pull/7554)
+that honors workerd's requested atomic cppgc sweeping. The prior 1.20260911.1
+runtime could replace that request with incremental/concurrent sweeping. The
+build rejects an installed compiler version that differs from `upstream.json`.
+This release also changes V8 and other workerd code; it is not a single-patch
+experiment or, by itself, proof that the intermittent navigation timeout is fixed.
 
 The patch also releases a page's RPC session capability after the existing one-second
 close grace even if the remote close never acknowledges. Normal close-before-kill ordering
