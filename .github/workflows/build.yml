@@ -35,6 +35,49 @@ jobs:
           curl -fLsS --retry 3 https://github.com/lightpanda-io/browser/releases/download/1.0.2/lightpanda-x86_64-linux -o build/comparison/lightpanda
           echo 'ae7d01d261efb9e480e18ce3424533332883863bcf70b12a4321b5733f37e19e  build/comparison/lightpanda' | sha256sum -c -
           chmod +x build/comparison/lightpanda
+      - name: Prepare correctness-gated comparison and chart tooling
+        shell: bash
+        run: |
+          sudo apt-get install -y libcairo2 python3-venv
+          python3 -m venv build/eval-render
+          build/eval-render/bin/pip install -r scripts/browser-eval/requirements-render.txt
+          mkdir -p artifacts/browser-eval
+          build/eval-render/bin/pip freeze > artifacts/browser-eval/render-versions.txt
+          cp packages/browser/provenance-fixture.json artifacts/browser-eval/
+          cp upstream.json artifacts/browser-eval/
+          node --input-type=module <<'JS'
+          import {readFileSync, writeFileSync} from 'node:fs';
+          import {createHash} from 'node:crypto';
+          import {execFileSync} from 'node:child_process';
+          const provenance = JSON.parse(readFileSync('packages/browser/provenance-fixture.json'));
+          const definitions = [
+            {id:'kitesurf', binary:'packages/browser/bin/kitesurf-fixture', runtimeIdentity:`workerd ${provenance.workerd}; upstream ${provenance.commit.slice(0,12)}; patch ${provenance.patchSha256.slice(0,12)}; fixture=true`},
+            {id:'chromium', binary:'build/comparison/chrome-linux64/chrome', version:'156.0.8078.47'},
+            {id:'lightpanda', binary:'build/comparison/lightpanda', version:'1.0.2'},
+          ];
+          const engines = definitions.map(({id,binary,runtimeIdentity,version}) => {
+            if (!runtimeIdentity) {
+              runtimeIdentity = execFileSync(binary, ['--version'], {encoding:'utf8'}).trim();
+              if (!runtimeIdentity.includes(version)) throw Error(`Unexpected ${id} version: ${runtimeIdentity}`);
+            }
+            const expectedSha256 = createHash('sha256').update(readFileSync(binary)).digest('hex');
+            if (id === 'kitesurf' && expectedSha256 !== provenance.binary.sha256) throw Error('Fixture provenance hash mismatch');
+            return {id,binary,runtimeIdentity,expectedSha256};
+          });
+          writeFileSync('artifacts/browser-eval/config.json', JSON.stringify({trials:5,warmups:2,repetitions:10,engines},null,2)+'\n',{flag:'wx'});
+          JS
+      - name: Five-trial correctness-gated browser workloads
+        shell: bash
+        timeout-minutes: 30
+        run: |
+          # Serial on one hosted runner, not an exclusive performance-qualified host.
+          node scripts/browser-eval/run.mjs --config artifacts/browser-eval/config.json --output artifacts/browser-eval/raw.json --measurement-window-reserved
+          node scripts/browser-eval/summary.mjs artifacts/browser-eval/raw.json artifacts/browser-eval/summary.json
+          for workload in navigation interaction javascript; do
+            for phase in cold warm; do
+              EVAL_PYTHON=build/eval-render/bin/python node scripts/browser-eval/chart.mjs artifacts/browser-eval/summary.json "$workload" "$phase" "artifacts/browser-eval/$workload-$phase"
+            done
+          done
       - name: Corrected three-browser comparison
         shell: bash
         run: |

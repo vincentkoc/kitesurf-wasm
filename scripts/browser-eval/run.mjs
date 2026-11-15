@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict';
 import * as fs from 'node:fs/promises';
 import {createHash} from 'node:crypto';
-import {spawn,execFileSync} from 'node:child_process';
+import {execFileSync} from 'node:child_process';
 import {once} from 'node:events';
 import http from 'node:http';
 import os from 'node:os';
@@ -12,6 +12,7 @@ import {setTimeout as delay} from 'node:timers/promises';
 import puppeteer from 'puppeteer-core';
 import {fixtures,fixtureHash,operation} from './fixtures.mjs';
 import {snapshot,accumulator} from './resources.mjs';
+import {launch} from './containment.mjs';
 
 const {values} = parseArgs({options:{config:{type:'string'},output:{type:'string'},'measurement-window-reserved':{type:'boolean',default:false}}});
 assert(values.config&&values.output,'--config and --output required');
@@ -39,7 +40,7 @@ const report={schema:1,status:'running',started:new Date().toISOString(),fixture
     'Each workload and measurement pass has a separate engine process; trials rotate engine order. No parallel execution.',
     'Latency excludes process-tree scans. Resource pass is separately instrumented at 50ms plus operation boundaries.',
     'RSS sums process-tree resident sets (shared pages double-count); PSS is reported separately. Sampled peak is not true peak.',
-    'CPU is observed process self ticks; exits between polls/final increments may be missed. Lower bound, not total CPU.',
+    'CPU is observed quantized process self ticks, not total CPU or a bound. Quantization can overcount; missed exits/final increments can undercount.',
     'Workload wall clock includes CDP navigation, actions and assertions. No rendering, real websites or network-speed claim.',
     'Any correctness, resource completeness, launch or cleanup failure invalidates the comparison; failures are retained, never wins.'
   ]};
@@ -48,24 +49,26 @@ const save=async()=>{const text=JSON.stringify(report,null,2)+'\n';await handle.
 async function listen(server){server.listen(0,'127.0.0.1');await once(server,'listening');return server.address().port;}
 async function freePort(){const s=http.createServer();const p=await listen(s);await new Promise(r=>s.close(r));return p;}
 const server=http.createServer((req,res)=>{const name=req.url.slice(1);if(!Object.hasOwn(fixtures,name)){res.writeHead(404);res.end();return;}res.setHeader('Content-Type','text/html; charset=utf-8');res.setHeader('Cache-Control','no-store');res.end(fixtures[name]);});
+report.supervisorVersion=execFileSync('python3',['--version'],{encoding:'utf8'}).trim();
 report.resourceEnvironment={LD_LIBRARY_PATH:process.env.LD_LIBRARY_PATH??null,TMPDIR:'/tmp',TMP:'/tmp',TEMP:'/tmp'};
 let active,interrupted=false;
-const terminate=(child,signal)=>{if(!child.pid)return;try{process.kill(-child.pid,signal);}catch(e){if(e.code!=='ESRCH')throw e;}};
-const interrupt=()=>{interrupted=true;if(active)terminate(active,'SIGTERM');};
+const terminate=child=>{if(child.exitCode===null&&!child.signalCode)child.kill('SIGTERM');};
+const interrupt=()=>{interrupted=true;if(active)terminate(active);};
 process.once('SIGINT',interrupt);process.once('SIGTERM',interrupt);
 async function run(engine,workload,phase,pass,trial,base){
   assert(!interrupted,'Evaluation interrupted');
   const row={engine:engine.id,workload,phase,pass,trial,status:'running',wallMs:[],started:new Date().toISOString(),loadBefore:os.loadavg()}; report.runs.push(row); await save();
   const profile=await fs.mkdtemp('/tmp/browser-eval-');
-  let child,browser,exit,polling=false,poller;
+  let child,browser,containment,rootPid,polling=false,poller;
   try{
     const port=await freePort();
     const args=engine.id==='kitesurf'?['--experimental',`--socket-addr=http=127.0.0.1:${port}`]:engine.id==='lightpanda'?['serve','--host','127.0.0.1','--port',String(port)]:['--headless=new','--disable-gpu','--no-sandbox','--disable-dev-shm-usage','--no-first-run','--no-default-browser-check','--disable-sync','--disable-background-networking','--disable-component-update','--no-proxy-server',`--user-data-dir=${profile}`,`--remote-debugging-port=${port}`];
     row.args=args;
     const start=performance.now(); let spawnError,stderr='';
-    child=active=spawn(engine.binary,args,{stdio:['ignore','ignore','pipe'],detached:true,env:{...process.env,TMPDIR:'/tmp',TMP:'/tmp',TEMP:'/tmp'}});
-    exit=new Promise(r=>{child.once('exit',r);child.once('error',r);});
-    child.on('error',e=>spawnError=e);child.stderr.on('data',x=>{stderr=(stderr+x).slice(-8000);});
+    containment=launch(engine.binary,args,{...process.env,TMPDIR:'/tmp',TMP:'/tmp',TEMP:'/tmp'});
+    child=active=containment.child;
+    child.on('error',e=>spawnError=e);child.stderr.on('data',x=>{stderr=(stderr+x).slice(-8000);row.stderr=stderr;});
+    rootPid=await containment.ready;row.rootPid=rootPid;
     let ready=false;
     for(let i=0;i<150;i++){
       if(spawnError)throw spawnError;
@@ -80,12 +83,12 @@ async function run(engine,workload,phase,pass,trial,base){
     const n=phase==='cold'?1:repetitions;
     let stats;
     if(pass==='resources'){
-      const first=await snapshot(child.pid); stats=accumulator(first,hz);stats.add(first);polling=true;
-      poller=(async()=>{while(polling){await delay(50);if(polling)stats.add(await snapshot(child.pid));}})();
+      const first=await snapshot(rootPid); stats=accumulator(first,hz);stats.add(first);polling=true;
+      poller=(async()=>{while(polling){await delay(50);if(polling)stats.add(await snapshot(rootPid));}})();
     }
     for(let i=0;i<n;i++){
       const t=performance.now();await operation(page,base,workload);row.wallMs.push(performance.now()-t);
-      if(stats)stats.add(await snapshot(child.pid));
+      if(stats)stats.add(await snapshot(rootPid));
     }
     polling=false;if(poller)await poller;
     if(stats){row.resources=stats.result(n);assert(row.resources.complete,'Incomplete process-tree sample');}
@@ -94,14 +97,17 @@ async function run(engine,workload,phase,pass,trial,base){
   finally{
     polling=false;if(poller)await poller.catch(()=>{});
     try{if(browser)await browser.disconnect();}finally{
-      if(child){if(child.pid){terminate(child,'SIGTERM');const timer=setTimeout(()=>terminate(child,'SIGKILL'),5000);await exit;clearTimeout(timer);terminate(child,'SIGKILL');}else await exit;active=null;}
-      await fs.rm(profile,{recursive:true,force:true});row.loadAfter=os.loadavg();await save();
+      try {
+        if(containment){try{row.cleanup=await containment.stop();}catch(e){row.status='failed';row.cleanup={status:'failed',error:String(e)};throw e;}}
+      } finally {
+        active=null;await fs.rm(profile,{recursive:true,force:true});row.loadAfter=os.loadavg();await save();
+      }
     }
   }
 }
 try{
   for(const engine of config.engines){const digest=await hash(engine.binary);if(engine.expectedSha256)assert.equal(digest,engine.expectedSha256,'Binary digest mismatch');report.engineIdentity.push({id:engine.id,runtimeIdentity:engine.runtimeIdentity,binarySha256:digest});}
-  report.harnessHashes={};for(const file of ['run.mjs','fixtures.mjs','resources.mjs','summary.mjs','chart.mjs'])report.harnessHashes[file]=await hash(new URL(file,import.meta.url));
+  report.harnessHashes={};for(const file of ['run.mjs','fixtures.mjs','resources.mjs','summary.mjs','chart.mjs','containment.mjs','supervise.py'])report.harnessHashes[file]=await hash(new URL(file,import.meta.url));
   const port=await listen(server),base=`http://127.0.0.1:${port}`;
   for(let trial=0;trial<trials;trial++) for(const workload of Object.keys(fixtures)) for(const phase of ['cold','warm']) for(const pass of ['latency','resources']){
     const offset=trial%3;

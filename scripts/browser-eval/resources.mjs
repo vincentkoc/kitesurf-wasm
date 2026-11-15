@@ -15,6 +15,7 @@ export async function snapshot(root) {
   }));
   return {members,complete:members.some(p=>p.pid===root)&&members.every(p=>p.rssKiB!==null)};
 }
+// Tick deltas are quantized observations, not mathematical bounds on CPU time.
 export function accumulator(before, hz) {
   const initial=new Map(before.members.map(p=>[`${p.pid}:${p.start}`,p.ticks]));
   const last=new Map(initial); let rss=0,pss=0,complete=before.complete,count=0;
@@ -24,6 +25,6 @@ export function accumulator(before, hz) {
       if(sample.complete){rss=Math.max(rss,sample.members.reduce((n,p)=>n+p.rssKiB,0)/1024);pss=Math.max(pss,sample.members.reduce((n,p)=>n+p.pssKiB,0)/1024);}
       for(const p of sample.members){const key=`${p.pid}:${p.start}`;last.set(key,Math.max(last.get(key)||0,p.ticks));}
     },
-    result(operations) {return {complete,sampleCount:count,sampledPeakRssMiB:complete?rss:null,sampledPeakPssMiB:complete?pss:null,cpuLowerBoundMsPerOp:[...last].reduce((n,[k,v])=>n+Math.max(0,v-(initial.get(k)||0)),0)*1000/hz/operations};}
+    result(operations) {return {complete,sampleCount:count,sampledPeakRssMiB:complete?rss:null,sampledPeakPssMiB:complete?pss:null,observedCpuMsPerOp:[...last].reduce((n,[k,v])=>n+Math.max(0,v-(initial.get(k)||0)),0)*1000/hz/operations};}
   };
 }

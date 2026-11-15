@@ -24,14 +24,20 @@ a complete measured run has passed and been reviewed.
 - Latency and resource passes use different fresh processes. Wall clock includes
   navigation, commands, serialization, assertions and harness overhead; it is not
   pure JS execution time. Resource-pass wall clock is not plotted.
+- Every launcher runs under a dedicated Linux Python 3 subreaper. Cleanup kills
+  only its descendants, including double-forked/setsid children, and reaps until
+  `waitpid` reports ECHILD. This is bounded to five seconds; missing/failed empty
+  verification aborts the campaign before another process starts. Python 3 and
+  Linux PR_SET_CHILD_SUBREAPER plus readable `/proc` are required.
 - Resource pass samples `/proc` process-tree RSS/PSS every 50ms and at operation
   boundaries. RSS double-counts shared pages; PSS does not. Peak means *sampled*
   peak for the workload batch, not per-page cost or exact maximum.
 - CPU sums observed self ticks per PID/start-time identity, retaining observed
-  departed members. It misses unsampled exits and final increments: a lower bound,
-  quantized by CLK_TCK, **not** total CPU. No % CPU headline or universal winner.
+  departed members. It misses unsampled exits and final increments and is
+  quantized by CLK_TCK. Quantization can overcount while missed increments can
+  undercount: this is an incomplete observation, **not** total CPU or a bound. No % CPU headline or universal winner.
 - Summary: median across trial medians for latency; median across resource-trial
-  batch peaks for memory and average CPU-ms/operation lower bounds. Cold has one
+  batch peaks for memory and average observed CPU-ms/operation. Cold has one
   operation per trial. Min–max whiskers describe trials, not confidence intervals.
 - No overall composite score or cross-workload arithmetic average. These local
   DOM/JS jobs do not qualify rendering, screenshots, visual fidelity, remote
@@ -40,7 +46,16 @@ a complete measured run has passed and been reviewed.
 ## Run only after reserving a measurement window
 
 Install the repo's pinned dependencies with `npm ci --ignore-scripts`. Build and
-validate the exact Kitesurf artifact separately, **before** reserving the window.
+validate the exact Kitesurf artifact separately, **before** reserving the window:
+
+```sh
+npm run build -- --fixture
+```
+
+Use `packages/browser/bin/kitesurf-fixture` for these localhost workloads. The
+production `kitesurf` binary intentionally disallows private-network fetches.
+If the upstream build already exists, reuse it with
+`npm run build -- --skip-upstream-build --fixture`.
 Create a local config outside public Git; values below are instructions, not data:
 
 ```json
@@ -49,7 +64,7 @@ Create a local config outside public Git; values below are instructions, not dat
   "warmups": 2,
   "repetitions": 10,
   "engines": [
-    {"id":"kitesurf", "binary":"/absolute/path/to/kitesurf", "runtimeIdentity":"workerd ACTUAL_VERSION; V8 ACTUAL_VERSION; build/flags identity", "expectedSha256":"ACTUAL_SHA256"},
+    {"id":"kitesurf", "binary":"/absolute/path/to/packages/browser/bin/kitesurf-fixture", "runtimeIdentity":"workerd ACTUAL_VERSION; V8 ACTUAL_VERSION; build/flags identity", "expectedSha256":"ACTUAL_SHA256"},
     {"id":"chromium", "binary":"/absolute/path/to/chrome", "runtimeIdentity":"Chrome for Testing ACTUAL_VERSION", "expectedSha256":"ACTUAL_SHA256"},
     {"id":"lightpanda", "binary":"/absolute/path/to/lightpanda", "runtimeIdentity":"Lightpanda ACTUAL_VERSION", "expectedSha256":"ACTUAL_SHA256"}
   ]
@@ -94,9 +109,21 @@ measurements and methodology. Independently review the exact SVG/PNG before post
 ## Lightweight checks (no browser launch)
 
 ```sh
-node --test test/browser-eval.test.mjs
+node --test test/browser-eval.test.mjs test/browser-eval-containment.test.mjs
 node --check scripts/browser-eval/run.mjs
 ```
 
-Tests use explicitly synthetic in-memory inputs only to exercise reducers, guards,
-fixture oracles and deterministic SVG. They are not publishable benchmark results.
+Tests use explicitly synthetic inputs to exercise reducers, guards, fixture
+oracles and deterministic SVG, plus fake Node launchers (including escaped
+setsid descendants) to verify bounded empty-containment cleanup. No browser launches. They are not publishable benchmark results.
+
+## Hosted correctness-gated campaign
+
+The existing Linux build workflow reuses its already-built fixture after installing
+pinned Chrome and checksum-verified Lightpanda. It installs chart tooling before
+measurement, runs five serial trials through the same correctness oracle, then
+renders all six workload/phase panels. A shared GitHub runner is not an exclusive
+reserved host: this is correctness and reproducibility evidence, not a performance
+qualification. Raw/summary JSON, binary hashes, actual version/build identities,
+fixture provenance and SVG/PNG outputs are retained in the existing artifact upload,
+even when the campaign fails (charts require a fully passing campaign).

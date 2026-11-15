@@ -17,7 +17,7 @@ export function summarize(report) {
       const rows=report.runs.filter(r=>r.workload===workload&&r.phase===phase&&r.engine===engine&&r.pass===pass);
       assert.equal(rows.length,trials,'Unbalanced comparison');
       assert.deepEqual(rows.map(r=>r.trial).sort((a,b)=>a-b),Array.from({length:trials},(_,i)=>i),'Duplicate/missing trial');
-      for(const r of rows){assert.equal(r.status,'passed');assert.equal(r.wallMs.length,phase==='cold'?1:repetitions);assert(r.wallMs.every(v=>Number.isFinite(v)&&v>=0));if(pass==='resources')assert.equal(r.resources.complete,true);}
+      for(const r of rows){assert.equal(r.status,'passed');assert.equal(r.cleanup?.status,'empty','Missing verified cleanup');assert.equal(r.cleanup?.verification,'subreaper waitpid ECHILD');assert.equal(r.wallMs.length,phase==='cold'?1:repetitions);assert(r.wallMs.every(v=>Number.isFinite(v)&&v>=0));if(pass==='resources')assert.equal(r.resources.complete,true);}
       passes[pass]=rows;
     }
     const stats=values=>{assert(values.every(v=>Number.isFinite(v)&&v>=0));return {median:median(values),min:Math.min(...values),max:Math.max(...values),n:values.length};};
@@ -25,7 +25,7 @@ export function summarize(report) {
       wallMs:stats(passes.latency.map(r=>median(r.wallMs))),
       sampledPeakRssMiB:stats(passes.resources.map(r=>r.resources.sampledPeakRssMiB)),
       sampledPeakPssMiB:stats(passes.resources.map(r=>r.resources.sampledPeakPssMiB)),
-      cpuLowerBoundMsPerOp:stats(passes.resources.map(r=>r.resources.cpuLowerBoundMsPerOp)),
+      observedCpuMsPerOp:stats(passes.resources.map(r=>r.resources.observedCpuMsPerOp)),
       startupReadyMs:stats(passes.latency.map(r=>r.startupReadyMs)),
     });
   }

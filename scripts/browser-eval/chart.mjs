@@ -16,7 +16,7 @@ export function render(summary,workload,phase){
   text(66,62,'BROWSER WORKLOADS / LOCAL CONTROLLED EVAL',16,'#9ca3aa');
   text(66,119,`${workload[0].toUpperCase()+workload.slice(1)} / ${phase} process`,42);
   text(66,157,`${summary.trials} independent trials / median of per-trial values / lower is better`,20,'#b0b6bd');
-  const metrics=[['wallMs','Wall clock','ms / operation'],['sampledPeakRssMiB','Process-tree sampled peak RSS','MiB'],['cpuLowerBoundMsPerOp','Observed CPU lower bound','ms / operation']];
+  const metrics=[['wallMs','Wall clock','ms / operation'],['sampledPeakRssMiB','Process-tree sampled peak RSS','MiB'],['observedCpuMsPerOp','Observed CPU (quantized, incomplete)','ms / operation']];
   for(let m=0;m<metrics.length;m++){
     const [key,title,unit]=metrics[m],top=215+m*230;
     const max=Math.max(...rows.map(r=>r[key].max));
@@ -37,7 +37,7 @@ export function render(summary,workload,phase){
   text(66,942,phase==='cold'?'Cold = fresh process/profile; first operation. Startup excluded; filesystem cache not flushed.':`Warm = ${summary.warmups} untimed warmups; ${summary.repetitions} fresh-document operations per trial.`,17,'#b0b6bd');
   text(66,970,'Same local HTTP + CDP actions/assertions. No pooling, screenshots, tracing or forced GC.',17,'#b0b6bd');
   text(66,998,'Latency and resource passes separate. RSS shares double-counted; sample interval 50ms + boundaries.',17,'#b0b6bd');
-  text(66,1026,'CPU may miss exited children. Whiskers = trial min-max, not confidence. All checks must pass.',17,'#b0b6bd');
+  text(66,1026,'CPU quantization can overcount; missed exits can undercount. Whiskers = trial min-max.',17,'#b0b6bd');
   for(let i=0;i<summary.engineIdentity.length;i++){
     const e=summary.engineIdentity[i];text(66,1069+i*27,`${names[e.id]}: ${e.runtimeIdentity} / binary ${e.binarySha256.slice(0,12)}`,16,'#9ca3aa');
   }
