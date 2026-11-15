@@ -19,7 +19,11 @@ npm run eval:browser -- --engine kitesurf --binary packages/browser/bin/kitesurf
 The fixture permits loopback only for these local HTTP tests; do not ship it as a production package.
 Each invocation refuses to overwrite an existing output, starts a fresh engine process, uses a new
 loopback port and profile, and cleans up its process and profile. Run invocations sequentially on a
-quiet host. The lifecycle test also runs in CI with five iterations and retains its JSON and stderr.
+quiet host. The lifecycle test also runs in CI with 100 iterations and retains its JSON and stderr.
+On Linux, add `--max-code-mib 128` to that Kitesurf lifecycle invocation to fail when
+resident executable anonymous mappings exceed 128 MiB. This is a regression guard for
+repeated WASM compilation, not a total-memory budget. It reads `/proc/PID/smaps` only at
+lifecycle checkpoints; latency runs do not include this sampling.
 
 For another executable, set `--engine chromium` or `--engine lightpanda` and `--binary /absolute/path`.
 Chromium must have its platform shared libraries installed. A failure to launch produces
@@ -94,9 +98,35 @@ This does not establish constant-memory browsing. A 100-navigation lifecycle run
 compiled-module patch reached approximately 1,449 MiB PSS, with visible normal-GC reductions
 during the run. Explicitly clearing retired session references did not improve it, so that
 experiment was discarded. Testing the same patched configuration with workerd 1.20261114.1
-also did not improve retention; the package keeps its original pin. Further investigation must
-distinguish live worker ownership from allocator high-water memory before claiming a leak fix.
+also did not improve retention; the package keeps its original pin. The investigation below distinguishes repeated compilation from live worker ownership.
 No forced GC, process recycling or mutable-isolate reuse was added.
+
+## Shared-code flushing repair, 2026-11-15
+
+The pinned workerd sends V8 a moderate memory-pressure notification when creating an
+isolate (`src/workerd/io/worker.c++`). V8's pressure collection can flush Liftoff code
+from all shared WASM modules. Compiler tracing showed the same module and functions
+being compiled again on successive navigations. Retired workers disappearing did not
+remove the accumulated resident executable mappings.
+
+The generated production and fixture configurations now set the stock V8 option
+`--no-flush-liftoff-code`. This prevents pressure-triggered eviction of baseline WASM
+code; ordinary JavaScript/WASM garbage collection, per-page instantiation, isolation,
+resource limits and cancellation remain enabled. The build records the option in its
+provenance. No custom workerd binary is required.
+
+A packaged fixture passed 100 navigations, navigation isolation and the 128 MiB
+executable-anonymous-RSS guard. Resident executable anonymous memory stayed below
+44 MiB, compared with approximately 890 MiB at navigation 100 in the earlier diagnostic.
+The old configuration failed the new guard at navigation 8 (133.9 MiB). These mapping
+measurements include anonymous executable code, not just WASM code, and are not total RSS.
+
+In that packaged run, whole-process PSS was approximately 274 MiB at the first document,
+535 MiB at navigation 100 and 482 MiB after disconnect. Normal GC produced a sawtooth
+rather than monotonic growth. This fixes the observed repeated-compilation path; it does
+not establish constant-memory browsing or eliminate all retention. A separate 30-navigation
+local latency pass measured a 135 ms median. It is a diagnostic result, not a controlled
+cross-browser ranking or statistical speedup estimate.
 
 ## Hosted comparison
 

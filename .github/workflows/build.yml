@@ -22,7 +22,7 @@ jobs:
       - run: npm run smoke:browser 2>&1 | tee browser-smoke.log
         shell: bash
       - run: npm run build -- --skip-upstream-build --fixture
-      - run: npm run eval:browser -- --engine kitesurf --binary packages/browser/bin/kitesurf-fixture --mode lifecycle --iterations 5 --output artifacts/browser-lifecycle.json
+      - run: npm run eval:browser -- --engine kitesurf --binary packages/browser/bin/kitesurf-fixture --mode lifecycle --iterations 100 --max-code-mib 128 --output artifacts/browser-lifecycle.json
       - run: npm run pack:artifacts
       - name: Install comparison browsers
         shell: bash
