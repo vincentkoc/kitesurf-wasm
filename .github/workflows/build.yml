@@ -57,7 +57,7 @@ jobs:
           ];
           const engines = definitions.map(({id,binary,runtimeIdentity,version}) => {
             if (!runtimeIdentity) {
-              runtimeIdentity = execFileSync(binary, ['--version'], {encoding:'utf8'}).trim();
+              runtimeIdentity = execFileSync(binary, id === 'lightpanda' ? ['version'] : ['--version'], {encoding:'utf8'}).trim();
               if (!runtimeIdentity.includes(version)) throw Error(`Unexpected ${id} version: ${runtimeIdentity}`);
             }
             const expectedSha256 = createHash('sha256').update(readFileSync(binary)).digest('hex');
