@@ -11,7 +11,10 @@ test('resources include live adopted setsid/double-fork descendants, then cleanu
   const dir=await fs.mkdtemp(join(os.tmpdir(),'eval-containment-test-'));
   const pidFile=join(dir,'escaped-pid');
   // Root -> detached intermediate -> detached long-lived grandchild.
-  const grandchild=`require('node:fs').writeFileSync(${JSON.stringify(pidFile)},String(process.pid));setInterval(()=>{},1000)`;
+  // /proc self ticks are quantized: startup may consume less than one tick.
+  // Complete known CPU work before announcing readiness, rather than assuming
+  // that process startup or a wall-clock sleep makes CPU accounting nonzero.
+  const grandchild=`const start=process.cpuUsage();for(;;){const used=process.cpuUsage(start);if(used.user+used.system>=50000)break;}require('node:fs').writeFileSync(${JSON.stringify(pidFile)},String(process.pid));setInterval(()=>{},1000)`;
   const intermediate=`require('node:child_process').spawn(process.execPath,['-e',${JSON.stringify(grandchild)}],{detached:true,stdio:'ignore'}).unref()`;
   const root=`require('node:child_process').spawn(process.execPath,['-e',${JSON.stringify(intermediate)}],{detached:true,stdio:'ignore'}).unref();setInterval(()=>{},1000)`;
   const owner=launch(process.execPath,['-e',root]);
