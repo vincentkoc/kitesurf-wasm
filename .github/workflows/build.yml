@@ -1,5 +1,14 @@
 name: Reproducible packages
-on: [push, pull_request, workflow_dispatch]
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      diagnostic_trace:
+        description: 'Capture diagnostic traces instead of performance charts'
+        required: false
+        type: boolean
+        default: false
 concurrency:
   group: kitesurf-${{ github.head_ref || github.ref_name }}
   cancel-in-progress: true
@@ -68,9 +77,9 @@ jobs:
           });
           writeFileSync('artifacts/browser-eval/config.json', JSON.stringify({trials:5,warmups:2,repetitions:10,engines},null,2)+'\n',{flag:'wx'});
           JS
-      - name: Five-trial correctness-gated browser workloads (diagnostic trace)
+      - name: Five-trial correctness-gated browser workloads
         env:
-          BROWSER_EVAL_TRACE_DIR: artifacts/browser-eval/trace
+          BROWSER_EVAL_TRACE_DIR: ${{ github.event_name == 'workflow_dispatch' && inputs.diagnostic_trace && 'artifacts/browser-eval/trace' || '' }}
         shell: bash
         timeout-minutes: 30
         run: |

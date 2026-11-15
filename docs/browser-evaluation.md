@@ -185,8 +185,10 @@ The fixture function, trusted type/click actions, isolation/result assertions an
 15-second navigation/protocol deadlines remain unchanged. A failed row aborts the
 campaign, and every row still requires the original subreaper cleanup verification.
 
-CI currently enables this observer for the full five-trial campaign. Trace sidecars
-remain in the existing always-uploaded `kitesurf-linux-x64` artifact. A separate
+Normal push and pull-request CI runs the untraced five-trial campaign. To capture
+a diagnostic campaign, manually dispatch the workflow with `diagnostic_trace` enabled.
+That explicit mode skips performance charts. Trace sidecars remain in the existing
+always-uploaded `kitesurf-linux-x64` artifact. A separate
 always-uploaded `kitesurf-browser-eval-replay` artifact retains the exact fixture binary,
 fixture provenance, upstream manifest and checksums, including after campaign failure.
 It is test-only replay evidence, never part of either production npm tarball. A build
