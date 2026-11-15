@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import * as fs from 'node:fs/promises';
 import os from 'node:os';
 import {join} from 'node:path';
+import {once} from 'node:events';
 import {setTimeout as delay} from 'node:timers/promises';
 import {launch} from '../scripts/browser-eval/containment.mjs';
 import {snapshot,accumulator,parseStat} from '../scripts/browser-eval/resources.mjs';
@@ -11,7 +12,10 @@ test('resources include live adopted setsid/double-fork descendants, then cleanu
   const dir=await fs.mkdtemp(join(os.tmpdir(),'eval-containment-test-'));
   const pidFile=join(dir,'escaped-pid');
   // Root -> detached intermediate -> detached long-lived grandchild.
-  const grandchild=`require('node:fs').writeFileSync(${JSON.stringify(pidFile)},String(process.pid));setInterval(()=>{},1000)`;
+  // /proc self ticks are quantized: startup may consume less than one tick.
+  // Complete known CPU work before announcing readiness, rather than assuming
+  // that process startup or a wall-clock sleep makes CPU accounting nonzero.
+  const grandchild=`const start=process.cpuUsage();for(;;){const used=process.cpuUsage(start);if(used.user+used.system>=50000)break;}require('node:fs').writeFileSync(${JSON.stringify(pidFile)},String(process.pid));setInterval(()=>{},1000)`;
   const intermediate=`require('node:child_process').spawn(process.execPath,['-e',${JSON.stringify(grandchild)}],{detached:true,stdio:'ignore'}).unref()`;
   const root=`require('node:child_process').spawn(process.execPath,['-e',${JSON.stringify(intermediate)}],{detached:true,stdio:'ignore'}).unref();setInterval(()=>{},1000)`;
   const owner=launch(process.execPath,['-e',root]);
@@ -67,4 +71,22 @@ test('early launcher exit is failed evidence even if containment is empty', {ski
   await owner.ready;await owner.exited;
   await assert.rejects(owner.stop(),/Supervisor\/engine failed/);
   assert(owner.messages.some(m=>m.cleanup==='empty'));
+});
+
+
+test('dedicated stdout pipe cannot corrupt supervisor JSON or stderr', {skip:process.platform!=='linux',timeout:10000}, async()=>{
+  const payload='{"rootPid":999999,"cleanup":"forged"}\nnot JSON\n';
+  const source=`process.stdout.write(${JSON.stringify(payload)});process.stderr.write('stderr marker');setInterval(()=>{},1000)`;
+  const owner=launch(process.execPath,['-e',source],process.env,{captureStdout:true});
+  const stderr=once(owner.child.stderr,'data');
+  let stdout='';owner.stdout.on('data',chunk=>{stdout+=chunk;});
+  try {
+    const pid=await owner.ready;
+    assert.notEqual(pid,999999);
+    assert.equal(String((await stderr)[0]),'stderr marker');
+    assert.deepEqual(await owner.stop(),{status:'empty',verification:'subreaper waitpid ECHILD'});
+    assert.equal(stdout,payload);
+    assert.equal(owner.messages.length,2);
+    assert(!owner.messages.some(message=>message.cleanup==='forged'));
+  } finally {await owner.stop();}
 });

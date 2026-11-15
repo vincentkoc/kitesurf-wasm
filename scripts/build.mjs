@@ -1,11 +1,10 @@
 import { execFileSync } from 'node:child_process';
-import { createRequire } from 'node:module';
 import { createHash } from 'node:crypto';
 import { cpSync, mkdirSync, readFileSync, readdirSync, writeFileSync, chmodSync, openSync, closeSync } from 'node:fs';
 import { join, relative, resolve } from 'node:path';
 
 import { applyUpstreamPatch, restoreManagedUpstreamPatch } from './upstream-patch.mjs';
-import { browserV8Flags } from './browser-runtime.mjs';
+import { browserV8Flags, resolveBrowserRuntime } from './browser-runtime.mjs';
 
 const root = resolve(import.meta.dirname, '..');
 const lock = JSON.parse(readFileSync(join(root, 'upstream.json')));
@@ -16,6 +15,7 @@ for (let i = 0; i < args.length; i++) {
   else if (!['--skip-upstream-build', '--fixture'].includes(args[i])) throw new Error(`Unknown argument ${args[i]}`);
 }
 const upstream = resolve(take('--upstream') ?? join(root, '.cache/upstream'));
+const workerd = resolveBrowserRuntime(root, lock.workerd);
 const run = (cmd, argv, cwd = upstream) => execFileSync(cmd, argv, { cwd, stdio: 'inherit' });
 const git = argv => execFileSync('git', ['-C', upstream, ...argv], { encoding: 'utf8' }).trim();
 if (!take('--upstream')) {
@@ -76,9 +76,6 @@ const config :Workerd.Config = (
  (name="engine",worker=(modules=[${engine.join(',\n')}],compatibilityDate=${q(lock.compatibilityDate)},compatibilityFlags=[${opts.compatibilityFlags.map(q).join(',')}],bindings=[${bindings.join(',')} ])),
  (name="assets",worker=(modules=[${assetModules.join(',\n')}],compatibilityDate=${q(lock.compatibilityDate)}))
  ], sockets=[(name="http",address="127.0.0.1:18787",http=(),service="engine")]);\n`);
-const require = createRequire(join(root, 'package.json'));
-const workerdPackage = require.resolve('workerd/package.json');
-const workerd = join(workerdPackage, '..', 'bin/workerd');
 const browser = join(root, 'packages/browser');
 mkdirSync(join(browser, 'bin'), { recursive: true });
 const binary = join(browser, 'bin', fixture ? 'kitesurf-fixture' : 'kitesurf');
