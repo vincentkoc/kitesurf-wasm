@@ -142,3 +142,184 @@ shared libraries. It does not make the runner dedicated or eliminate host/order 
 Read the individual run hashes, versions and host-load observations before comparing results.
 The historical OpenClaw workflow results and these direct-CDP measurements are different
 workloads and must not be combined into one speedup claim.
+
+
+## Opt-in failure tracing
+
+Set `BROWSER_EVAL_TRACE_DIR` to retain diagnostic sidecars for the correctness-gated
+`scripts/browser-eval/run.mjs` campaign. For example, after building and preparing its
+configuration through the normal workflow:
+
+```sh
+BROWSER_EVAL_TRACE_DIR=artifacts/browser-eval/trace \
+  node scripts/browser-eval/run.mjs --config artifacts/browser-eval/config.json \
+  --output artifacts/browser-eval/raw.json --measurement-window-reserved
+```
+
+The output has `diagnosticOnly: true`. Tracing changes timing and allocation overhead;
+these rows are diagnostic observations, not a performance-qualified comparison. The
+summary tool refuses diagnostic reports, and trace-enabled CI skips summary charts.
+When the variable is absent, no trace files or observer method wrappers are created.
+A trace directory cannot reuse an existing row directory or overwrite earlier evidence.
+
+Each row retains:
+
+- `events.jsonl`: row identity, UTC/monotonic timestamps, warmup/measured operation index,
+  method start/end/error markers, and raw Puppeteer CDP requests, replies and events.
+  Request, session, frame and loader IDs are preserved. The built-in logger API is
+  tested against pinned Puppeteer 25.16.0; no extra CDP commands or `cdpDebug` flag are sent.
+- `stdout.log` and `stderr.log`: full engine output through monitored Node streams (stdout uses a
+  dedicated pipe), separately from the supervisor's JSON control channel and the existing raw-row stderr tail.
+- `manifest.json`: complete/incomplete trace status. Stream errors fail the campaign;
+  queued writes flush only at the row boundary, never through awaited writes inside
+  a fixture operation. Stdout backpressure is honored; after a sink error, its pipe
+  is drained/discarded to avoid blocking the engine, and the trace cannot pass.
+  Row-boundary flushing has its own five-second diagnostic budget; a stalled sink
+  fails as incomplete without widening any engine/navigation deadline. An engine assertion failure can have a complete trace while
+  the row and campaign correctly remain failed.
+
+On failure only, the trace adds Linux pressure, memory, process-tree resource/state and
+wait-channel observations before containment cleanup. Missing OS data is recorded as
+unavailable, not inferred. No pressure or process scans are added to latency operations.
+The fixture function, trusted type/click actions, isolation/result assertions and
+15-second navigation/protocol deadlines remain unchanged. A failed row aborts the
+campaign, and every row still requires the original subreaper cleanup verification.
+
+Normal push and pull-request CI runs the untraced five-trial campaign. To capture
+a diagnostic campaign, manually dispatch the workflow with `diagnostic_trace` enabled.
+That explicit mode skips performance charts. Trace sidecars remain in the existing
+always-uploaded `kitesurf-linux-x64` artifact. A separate
+always-uploaded `kitesurf-browser-eval-replay` artifact retains the exact fixture binary,
+fixture provenance, upstream manifest and checksums, including after campaign failure.
+It is test-only replay evidence, never part of either production npm tarball. A build
+that fails before producing a fixture cannot provide an exact binary for replay.
+
+### Low-perturbation failure ring
+
+For failures that disappear with streaming trace enabled, set `BROWSER_EVAL_RING_DIR`
+instead of `BROWSER_EVAL_TRACE_DIR`, or manually dispatch with `diagnostic_ring: true`.
+Both workflow inputs default to false. Selecting both modes is rejected before the
+build; the harness also rejects both environment variables before creating output.
+Normal push and pull-request runs remain untraced and eligible for summary charts.
+
+The ring uses the same built-in Puppeteer logger, but only retains raw CDP strings
+and sequence/monotonic timestamps in memory. It does not parse messages, write files,
+wrap page methods, add per-operation awaits, issue CDP commands or enable engine
+debugging on the hot path. Existing fixture operations, assertions and 15-second
+navigation/protocol deadlines are unchanged. This is lower-perturbation observation,
+not zero-overhead observation: even a ring can change scheduling or memory pressure.
+Every ring-enabled campaign has `diagnosticOnly: true`, including successful ones,
+and the summary tool rejects it. Never present its timings as scored performance.
+
+Each fresh process gets a ring capped at 2,048 messages and 4 MiB of retained UTF-16
+string payload; entry metadata is separately bounded by the entry cap. Oldest entries
+are evicted at either limit. A message larger than the payload cap is dropped whole,
+not sliced into invalid JSON. Counts of received, retained, dropped and oversized
+messages, payload usage and capture errors are explicit in raw-row ring metadata.
+`historyTruncated` records loss, and `completeHistory` is always false: this is only
+recent Puppeteer-connection traffic, not startup or complete engine history.
+
+Successful rows discard the ring without creating sidecars. After a row fails, the
+ring freezes before post-failure work and writes an exclusive row directory:
+
+- `cdp.jsonl`: recent requests, replies and events, preserving request/session/frame/
+  loader IDs. JSON parsing happens only during the failure dump; malformed input is
+  retained as raw text and marks the dump incomplete.
+- `failure.json`: original error, completed measured-operation count, the existing
+  stderr tail, and the same failure-only Linux memory/pressure/process/state snapshot
+  used by streaming trace mode. Unavailable OS data is recorded explicitly.
+- `manifest.json`: bounded-history counters and a provisional `pending` status;
+  completion authority is the owning raw report's `row.ring` (`written` or `incomplete`).
+  A stalled final write can arrive late, so the sidecar never asserts terminal success.
+  A written dump is not a claim of complete history. Dump errors never make a failed
+  workload pass, and capture errors invalidate otherwise successful diagnostic rows.
+
+Snapshot capture and all dump I/O share a separate five-second post-failure budget.
+Timeout returns `incomplete` with `timedOut: true`, aborts supported reads/writes and
+allows containment cleanup to proceed. Later completions cannot mutate the frozen
+raw-row result or advance to another dump stage. The existing process-tree reader
+is not internally cancellable and may finish its scan after expiry; its result is
+ignored. Already-issued native filesystem work may finish or leave partial sidecars;
+it cannot promote the result to success. This budget does not extend the workload's
+15-second deadline.
+
+Ring mode does not collect full stdout or full stderr. Its sidecars are retained only
+in the existing always-uploaded CI artifact, never either production npm tarball.
+The separate exact-fixture replay artifact remains unchanged. Do not widen timeouts,
+exclude failed rows or infer a root cause solely because a diagnostic mode passes.
+
+### Failure-only native stacks (manual diagnostic)
+
+`diagnostic_native: true` is default-off and requires `diagnostic_ring: true` with
+streaming trace disabled. Normal push/PR runs do not install GDB, start debugger
+helpers, enable supervisor control or capture native stacks. The harness also
+rejects native mode unless `GITHUB_EVENT_NAME=workflow_dispatch`. All such runs
+remain diagnostic-only and cannot produce scored summary charts.
+
+This manual workflow installs GDB in the ephemeral hosted runner only, then runs
+`native-preflight.mjs` against its own synthetic `sleep` child. The preflight records
+GDB version, ptrace policy, actual stack/exit/detach evidence and ECHILD cleanup in
+`artifacts/browser-eval/native-preflight.json`. If attachment is unavailable or the
+preflight fails, the workflow stops before the browser build/campaign. It does not
+change ptrace_scope, file capabilities, global configuration or engine flags.
+
+After an original operation fails, the ring freezes and finishes its separately
+bounded dump first. Native capture then gets at most five additional seconds,
+including supervisor handshake, identity/hash checks, debugger execution and exit
+verification. It does not extend the operation's 15-second deadline. The original
+failure remains failed regardless of the diagnostic result.
+
+The opt-in supervisor control channel ACKs its unreaped direct child's PID,
+start time, UID, PPID and executable device/inode. The hold has no automatic
+expiry: a diagnostic timeout is not proof that a numeric-PID attach has stopped.
+Release is allowed before any debugger could start, or only after its exit has
+been verified. Identity, executable/hash, live state and TracerPid checks precede
+attachment. There is no PID/name search fallback. A hold request whose control-channel caller
+times out remains recorded as abandoned. If its grant arrives late, the control
+owner releases only that abandoned token: it was never delivered, so no debugger
+could have started with it. Already delivered holds retain the exit-proof rule.
+
+GDB is never elevated. In this mode alone, the target's pre-exec hook grants
+`PR_SET_PTRACER` to the existing harness controller and its descendants. This is
+a task-local relationship, not `PR_SET_PTRACER_ANY`; normal targets are unchanged.
+It does not change dumpability, ptrace_scope or capabilities. The hosted preflight
+rejects root, CAP_SYS_PTRACE and policy modes that prohibit this unprivileged
+relationship, rather than escalating or weakening a global guard. See the
+[Linux Yama documentation](https://www.kernel.org/doc/html/latest/admin-guide/LSM/Yama.html).
+
+GDB runs under an independent, unprivileged GNU timeout watchdog in a dedicated
+process group. `--foreground` keeps the watchdog alive to kill and reap GDB
+rather than killing itself; fixed GDB commands cannot spawn shell commands or
+call into the inferior. TERM is followed by KILL after 250 ms. There is no sudo
+debugger proxy or privileged descendant hidden in another process group.
+Initialization files, auto-loading and debuginfod are disabled; only thread
+listings, up to 32 native frames per thread, PC/SP/frame-pointer registers,
+mappings and detach are requested. No breakpoint, continue, inferior function
+call, core dump or runtime modification is requested.
+
+Cancellation and control-channel loss kill the engine and adopted descendants
+immediately, but do not reap its held PID. After a deadline, the result is frozen
+as incomplete while a separate exit observer retains custody. Once debugger
+exit is verified, it releases the hold and the supervisor reaches ECHILD. A late
+release emits a separate custody event; it never promotes the failed/frozen row.
+If exit remains unconfirmed, the existing bounded stop reports cleanup incomplete
+with the held PID and capture token, and the supervisor retains the zombie.
+This deliberately trades bounded physical cleanup for safe PID custody.
+Controller loss can require operator recovery: verify debugger exit before
+terminating its custody supervisor, rather than forcing a potentially unsafe reap.
+
+`row.native` retains at most 1 MiB combined stdout/stderr while the pipes continue
+to drain, plus bytes observed, truncation, target identity, watchdog status, detach
+marker and debugger process-group exit observation. Output-cap, timeout, identity,
+permission, capture and cleanup failures are explicit (`incomplete`/`unavailable`),
+never silently successful. Terminal results are frozen; late I/O cannot promote
+them. A watchdog exit alone is not accepted if observed group members remain.
+Engine cleanup still requires the existing subreaper `waitpid ECHILD` proof.
+
+Native stack symbols and unwind data may identify teardown, compilation, locking
+or event-loop work, but optimized or generated Wasm/JavaScript frames can remain
+unresolved. One snapshot is not proof of a CPU loop or ownership by a particular
+document. Capture overhead is after failure but can still alter the observed
+state. Kernel-uninterruptible work can prevent a physical exit; report that
+limitation instead of claiming complete debugger cleanup. Raw native output is
+retained only as diagnostic evidence, never in production npm tarballs.

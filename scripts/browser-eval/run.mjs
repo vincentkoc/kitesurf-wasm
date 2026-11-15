@@ -13,6 +13,16 @@ import puppeteer from 'puppeteer-core';
 import {fixtures,fixtureHash,operation} from './fixtures.mjs';
 import {snapshot,accumulator} from './resources.mjs';
 import {launch} from './containment.mjs';
+import {createRowTrace} from './trace.mjs';
+import {createCdpRing} from './ring.mjs';
+import {captureNative} from './native.mjs';
+const traceRoot=process.env.BROWSER_EVAL_TRACE_DIR?resolve(process.env.BROWSER_EVAL_TRACE_DIR):null;
+const ringRoot=process.env.BROWSER_EVAL_RING_DIR?resolve(process.env.BROWSER_EVAL_RING_DIR):null;
+const nativeEnabled=process.env.BROWSER_EVAL_NATIVE==='1';
+assert(!process.env.BROWSER_EVAL_NATIVE||nativeEnabled,'Invalid native diagnostic flag');
+assert(!nativeEnabled||(ringRoot&&!traceRoot&&process.env.GITHUB_EVENT_NAME==='workflow_dispatch'),'Native capture requires a manual ring diagnostic');
+assert(!(traceRoot&&ringRoot),'Streaming trace and failure ring modes are mutually exclusive');
+if(traceRoot)await fs.mkdir(traceRoot,{recursive:true});
 
 const {values} = parseArgs({options:{config:{type:'string'},output:{type:'string'},'measurement-window-reserved':{type:'boolean',default:false}}});
 assert(values.config&&values.output,'--config and --output required');
@@ -32,7 +42,7 @@ const output=resolve(values.output);
 const handle=await fs.open(output,'wx');
 const hz=Number(execFileSync('getconf',['CLK_TCK'],{encoding:'utf8'}));
 const hash=async path=>createHash('sha256').update(await fs.readFile(path)).digest('hex');
-const report={schema:1,status:'running',started:new Date().toISOString(),fixtureHash,config,
+const report={schema:1,diagnosticOnly:!!(traceRoot||ringRoot),status:'running',started:new Date().toISOString(),fixtureHash,config,
   host:{platform:process.platform,arch:process.arch,node:process.version,kernel:os.release(),cpu:os.cpus()[0]?.model,cpuCount:os.cpus().length,load:os.loadavg(),totalMemory:os.totalmem()},
   engineIdentity:[],runs:[],notes:[
     'Cold means a fresh process/profile and its first workload, not cold filesystem cache. Startup readiness is separate.',
@@ -44,6 +54,12 @@ const report={schema:1,status:'running',started:new Date().toISOString(),fixture
     'Workload wall clock includes CDP navigation, actions and assertions. No rendering, real websites or network-speed claim.',
     'Any correctness, resource completeness, launch or cleanup failure invalidates the comparison; failures are retained, never wins.'
   ]};
+if(traceRoot)report.notes.unshift('DIAGNOSTIC ONLY: trace observation changes overhead; timings are not performance-qualified and cannot be charted.');
+if(ringRoot){
+  report.diagnosticMode=nativeEnabled?'failure-ring-native':'failure-ring';
+  if(nativeEnabled)report.notes.unshift('DIAGNOSTIC ONLY: native stacks are captured after failure; native output is bounded and may be incomplete.');
+  report.notes.unshift('DIAGNOSTIC ONLY: bounded in-memory CDP ring; failure-only dump, never complete history. Logger overhead can change timing; no performance charts.');
+}
 // FileHandle.writeFile uses its current offset: write by explicit position instead.
 const save=async()=>{const text=JSON.stringify(report,null,2)+'\n';await handle.truncate(0);await handle.write(text,0,'utf8');await handle.sync();};
 async function listen(server){server.listen(0,'127.0.0.1');await once(server,'listening');return server.address().port;}
@@ -52,22 +68,34 @@ const server=http.createServer((req,res)=>{const name=req.url.slice(1);if(!Objec
 report.supervisorVersion=execFileSync('python3',['--version'],{encoding:'utf8'}).trim();
 report.resourceEnvironment={LD_LIBRARY_PATH:process.env.LD_LIBRARY_PATH??null,TMPDIR:'/tmp',TMP:'/tmp',TEMP:'/tmp'};
 let active,interrupted=false;
+const interruption=new AbortController();
 const terminate=child=>{if(child.exitCode===null&&!child.signalCode)child.kill('SIGTERM');};
-const interrupt=()=>{interrupted=true;if(active)terminate(active);};
+const interrupt=()=>{interrupted=true;interruption.abort();if(active)terminate(active);};
 process.once('SIGINT',interrupt);process.once('SIGTERM',interrupt);
 async function run(engine,workload,phase,pass,trial,base){
   assert(!interrupted,'Evaluation interrupted');
   const row={engine:engine.id,workload,phase,pass,trial,status:'running',wallMs:[],started:new Date().toISOString(),loadBefore:os.loadavg()}; report.runs.push(row); await save();
   const profile=await fs.mkdtemp('/tmp/browser-eval-');
-  let child,browser,containment,rootPid,supervisorPid,polling=false,poller;
+  let child,browser,containment,rootPid,supervisorPid,polling=false,poller,trace,restoreTrace,page,ring,ringDirectory;
+  const observedOperation=(kind,index)=>trace?trace.runOperation(kind,index,()=>operation(page,base,workload)):operation(page,base,workload);
   try{
+    if(ringRoot){
+      ring=createCdpRing();
+      ringDirectory=resolve(ringRoot,String(report.runs.length).padStart(4,'0')+'-'+engine.id+'-'+workload+'-'+phase+'-'+pass+'-'+trial);
+    }
+    if(traceRoot){
+      const directory=resolve(traceRoot,String(report.runs.length).padStart(4,'0')+'-'+engine.id+'-'+workload+'-'+phase+'-'+pass+'-'+trial);
+      row.trace={status:'running',directory};
+      trace=await createRowTrace(directory,{row:report.runs.length,engine:engine.id,workload,phase,pass,trial});
+    }
     const port=await freePort();
     const args=engine.id==='kitesurf'?['--experimental',`--socket-addr=http=127.0.0.1:${port}`]:engine.id==='lightpanda'?['serve','--host','127.0.0.1','--port',String(port)]:['--headless=new','--disable-gpu','--no-sandbox','--disable-dev-shm-usage','--no-first-run','--no-default-browser-check','--disable-sync','--disable-background-networking','--disable-component-update','--no-proxy-server',`--user-data-dir=${profile}`,`--remote-debugging-port=${port}`];
     row.args=args;
     const start=performance.now(); let spawnError,stderr='';
-    containment=launch(engine.binary,args,{...process.env,TMPDIR:'/tmp',TMP:'/tmp',TEMP:'/tmp'});
+    containment=launch(engine.binary,args,{...process.env,TMPDIR:'/tmp',TMP:'/tmp',TEMP:'/tmp'},{captureStdout:!!trace,captureControl:nativeEnabled});
     child=active=containment.child;
-    child.on('error',e=>spawnError=e);child.stderr.on('data',x=>{stderr=(stderr+x).slice(-8000);row.stderr=stderr;});
+    if(trace)trace.captureStdout(containment.stdout);
+    child.on('error',e=>spawnError=e);child.stderr.on('data',x=>{stderr=(stderr+x).slice(-8000);row.stderr=stderr;trace?.stderr(x);});
     rootPid=await containment.ready;row.rootPid=rootPid;
     supervisorPid=child.pid;row.supervisorPid=supervisorPid;
     let ready=false;
@@ -78,9 +106,13 @@ async function run(engine,workload,phase,pass,trial,base){
       await delay(100);
     }
     assert(ready,'Readiness timed out');row.startupReadyMs=performance.now()-start;
-    browser=await puppeteer.connect(engine.id==='chromium'?{browserURL:`http://127.0.0.1:${port}`,protocolTimeout:15000}:{browserWSEndpoint:`ws://127.0.0.1:${port}${engine.id==='kitesurf'?'/devtools/browser':''}`,protocolTimeout:15000});
-    const page=await browser.newPage();
-    if(phase==='warm')for(let i=0;i<warmups;i++)await operation(page,base,workload);
+    const connectOptions=engine.id==='chromium'?{browserURL:`http://127.0.0.1:${port}`,protocolTimeout:15000}:{browserWSEndpoint:`ws://127.0.0.1:${port}${engine.id==='kitesurf'?'/devtools/browser':''}`,protocolTimeout:15000};
+    if(trace)connectOptions.logger=trace.logger;
+    if(ring)connectOptions.logger=ring.logger;
+    browser=await puppeteer.connect(connectOptions);
+    page=await browser.newPage();
+    if(trace)restoreTrace=trace.install(page);
+    if(phase==='warm')for(let i=0;i<warmups;i++){await observedOperation('warmup',i);trace?.assertHealthy();}
     const n=phase==='cold'?1:repetitions;
     let stats;
     if(pass==='resources'){
@@ -88,27 +120,46 @@ async function run(engine,workload,phase,pass,trial,base){
       poller=(async()=>{while(polling){await delay(50);if(polling)stats.add(await snapshot(supervisorPid));}})();
     }
     for(let i=0;i<n;i++){
-      const t=performance.now();await operation(page,base,workload);row.wallMs.push(performance.now()-t);
+      const t=performance.now();await observedOperation('measured',i);row.wallMs.push(performance.now()-t);trace?.assertHealthy();
       if(stats)stats.add(await snapshot(supervisorPid));
     }
     polling=false;if(poller)await poller;
     if(stats){row.resources=stats.result(n);assert(row.resources.complete,'Incomplete process-tree sample');}
     row.status='passed';
-  }catch(e){row.status='failed';row.error=String(e.stack||e);throw e;}
+  }catch(e){
+    row.status='failed';row.error=String(e.stack||e);
+    if(trace)await trace.captureFailure(supervisorPid);
+    if(ring)row.ring=await ring.dumpFailure(ringDirectory,{engine:engine.id,workload,phase,pass,trial,error:row.error,completedMeasuredOperations:row.wallMs.length,stderrTail:row.stderr??''},supervisorPid);
+    if(nativeEnabled&&containment)row.native=await captureNative(containment,{binary:engine.binary,sha256:engine.expectedSha256},{signal:interruption.signal});
+    throw e;
+  }
   finally{
     polling=false;if(poller)await poller.catch(()=>{});
     try{if(browser)await browser.disconnect();}finally{
       try {
+        trace?.drainStdout();
         if(containment){try{row.cleanup=await containment.stop();}catch(e){row.status='failed';row.cleanup={status:'failed',error:String(e)};throw e;}}
       } finally {
-        active=null;await fs.rm(profile,{recursive:true,force:true});row.loadAfter=os.loadavg();await save();
+        active=null;restoreTrace?.();
+        try{
+          if(ring&&!row.ring){
+            row.ring=row.status==='failed'
+              ?await ring.dumpFailure(ringDirectory,{engine:engine.id,workload,phase,pass,trial,error:row.cleanup?.error??'Row cleanup failed',completedMeasuredOperations:row.wallMs.length,stderrTail:row.stderr??''},supervisorPid)
+              :ring.discard();
+            if(row.status==='passed'&&row.ring.status==='incomplete'){
+              row.status='failed';throw Error('Incomplete diagnostic ring capture');
+            }
+          }
+          if(trace){try{row.trace=await trace.close();}catch(error){row.status='failed';row.trace=trace.status();throw error;}}
+          else if(row.trace){row.trace.status='incomplete';row.trace.errors=[row.error??'Trace setup failed'];}
+        }finally{await fs.rm(profile,{recursive:true,force:true});row.loadAfter=os.loadavg();await save();}
       }
     }
   }
 }
 try{
   for(const engine of config.engines){const digest=await hash(engine.binary);if(engine.expectedSha256)assert.equal(digest,engine.expectedSha256,'Binary digest mismatch');report.engineIdentity.push({id:engine.id,runtimeIdentity:engine.runtimeIdentity,binarySha256:digest});}
-  report.harnessHashes={};for(const file of ['run.mjs','fixtures.mjs','resources.mjs','summary.mjs','chart.mjs','containment.mjs','supervise.py'])report.harnessHashes[file]=await hash(new URL(file,import.meta.url));
+  report.harnessHashes={};for(const file of ['run.mjs','fixtures.mjs','resources.mjs','summary.mjs','chart.mjs','containment.mjs','supervise.py','trace.mjs','ring.mjs','native.mjs'])report.harnessHashes[file]=await hash(new URL(file,import.meta.url));
   const port=await listen(server),base=`http://127.0.0.1:${port}`;
   for(let trial=0;trial<trials;trial++) for(const workload of Object.keys(fixtures)) for(const phase of ['cold','warm']) for(const pass of ['latency','resources']){
     const offset=trial%3;

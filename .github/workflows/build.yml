@@ -1,5 +1,24 @@
 name: Reproducible packages
-on: [push, pull_request, workflow_dispatch]
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      diagnostic_trace:
+        description: 'Capture diagnostic traces instead of performance charts'
+        required: false
+        type: boolean
+        default: false
+      diagnostic_ring:
+        description: 'Buffer bounded CDP history and dump only after failure (no performance charts)'
+        required: false
+        type: boolean
+        default: false
+      diagnostic_native:
+        description: 'Capture bounded native stacks after ring failure (requires diagnostic_ring)'
+        required: false
+        type: boolean
+        default: false
 concurrency:
   group: kitesurf-${{ github.head_ref || github.ref_name }}
   cancel-in-progress: true
@@ -10,14 +29,29 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
+      - name: Reject conflicting diagnostic modes
+        if: ${{ github.event_name == 'workflow_dispatch' && ((inputs.diagnostic_trace && inputs.diagnostic_ring) || (inputs.diagnostic_native && !inputs.diagnostic_ring)) }}
+        run: echo 'Choose trace or ring; native capture requires ring'; exit 1
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: '22.16.0'
           cache: npm
       - run: npm ci
+      - name: Qualify native diagnostics on an owned synthetic child
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.diagnostic_native && inputs.diagnostic_ring && !inputs.diagnostic_trace }}
+        timeout-minutes: 3
+        env:
+          BROWSER_EVAL_NATIVE: '1'
+        run: |
+          sudo -n apt-get update -qq
+          sudo -n apt-get install -y --no-install-recommends gdb
+          mkdir -p artifacts/browser-eval
+          node scripts/browser-eval/native-preflight.mjs --output artifacts/browser-eval/native-preflight.json
       - run: corepack enable
       - run: npm run build
+      - name: Patched upstream RPC teardown regressions (Node adapter)
+        run: node scripts/test-upstream-rpc.mjs
       - run: npm test
       - run: npm run smoke:browser 2>&1 | tee browser-smoke.log
         shell: bash
@@ -67,17 +101,24 @@ jobs:
           writeFileSync('artifacts/browser-eval/config.json', JSON.stringify({trials:5,warmups:2,repetitions:10,engines},null,2)+'\n',{flag:'wx'});
           JS
       - name: Five-trial correctness-gated browser workloads
+        env:
+          BROWSER_EVAL_TRACE_DIR: ${{ github.event_name == 'workflow_dispatch' && inputs.diagnostic_trace && 'artifacts/browser-eval/trace' || '' }}
+          BROWSER_EVAL_RING_DIR: ${{ github.event_name == 'workflow_dispatch' && inputs.diagnostic_ring && 'artifacts/browser-eval/ring' || '' }}
+          BROWSER_EVAL_NATIVE: ${{ github.event_name == 'workflow_dispatch' && inputs.diagnostic_native && inputs.diagnostic_ring && !inputs.diagnostic_trace && '1' || '' }}
         shell: bash
         timeout-minutes: 30
         run: |
           # Serial on one hosted runner, not an exclusive performance-qualified host.
           node scripts/browser-eval/run.mjs --config artifacts/browser-eval/config.json --output artifacts/browser-eval/raw.json --measurement-window-reserved
-          node scripts/browser-eval/summary.mjs artifacts/browser-eval/raw.json artifacts/browser-eval/summary.json
-          for workload in navigation interaction javascript; do
-            for phase in cold warm; do
-              EVAL_PYTHON=build/eval-render/bin/python node scripts/browser-eval/chart.mjs artifacts/browser-eval/summary.json "$workload" "$phase" "artifacts/browser-eval/$workload-$phase"
+          # Trace overhead is diagnostic, never a scored performance comparison.
+          if [ -z "${BROWSER_EVAL_TRACE_DIR:-}" ] && [ -z "${BROWSER_EVAL_RING_DIR:-}" ]; then
+            node scripts/browser-eval/summary.mjs artifacts/browser-eval/raw.json artifacts/browser-eval/summary.json
+            for workload in navigation interaction javascript; do
+              for phase in cold warm; do
+                EVAL_PYTHON=build/eval-render/bin/python node scripts/browser-eval/chart.mjs artifacts/browser-eval/summary.json "$workload" "$phase" "artifacts/browser-eval/$workload-$phase"
+              done
             done
-          done
+          fi
       - name: Corrected three-browser comparison
         shell: bash
         run: |
@@ -96,6 +137,21 @@ jobs:
               fi
             done
           done
+      - name: Retain exact diagnostic fixture (not an npm package)
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p build/browser-eval-replay
+          for file in packages/browser/bin/kitesurf-fixture packages/browser/provenance-fixture.json upstream.json; do
+            if [ -f "$file" ]; then cp "$file" build/browser-eval-replay/; fi
+          done
+          (cd build/browser-eval-replay && find . -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 -r sha256sum > SHA256SUMS)
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: kitesurf-browser-eval-replay
+          path: build/browser-eval-replay/
+          if-no-files-found: error
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:

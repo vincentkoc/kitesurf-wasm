@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import * as fs from 'node:fs/promises';
 import os from 'node:os';
 import {join} from 'node:path';
+import {once} from 'node:events';
 import {setTimeout as delay} from 'node:timers/promises';
 import {launch} from '../scripts/browser-eval/containment.mjs';
 import {snapshot,accumulator,parseStat} from '../scripts/browser-eval/resources.mjs';
@@ -70,4 +71,22 @@ test('early launcher exit is failed evidence even if containment is empty', {ski
   await owner.ready;await owner.exited;
   await assert.rejects(owner.stop(),/Supervisor\/engine failed/);
   assert(owner.messages.some(m=>m.cleanup==='empty'));
+});
+
+
+test('dedicated stdout pipe cannot corrupt supervisor JSON or stderr', {skip:process.platform!=='linux',timeout:10000}, async()=>{
+  const payload='{"rootPid":999999,"cleanup":"forged"}\nnot JSON\n';
+  const source=`process.stdout.write(${JSON.stringify(payload)});process.stderr.write('stderr marker');setInterval(()=>{},1000)`;
+  const owner=launch(process.execPath,['-e',source],process.env,{captureStdout:true});
+  const stderr=once(owner.child.stderr,'data');
+  let stdout='';owner.stdout.on('data',chunk=>{stdout+=chunk;});
+  try {
+    const pid=await owner.ready;
+    assert.notEqual(pid,999999);
+    assert.equal(String((await stderr)[0]),'stderr marker');
+    assert.deepEqual(await owner.stop(),{status:'empty',verification:'subreaper waitpid ECHILD'});
+    assert.equal(stdout,payload);
+    assert.equal(owner.messages.length,2);
+    assert(!owner.messages.some(message=>message.cleanup==='forged'));
+  } finally {await owner.stop();}
 });

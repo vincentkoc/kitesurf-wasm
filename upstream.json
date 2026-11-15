@@ -1,7 +1,7 @@
 {
   "repository": "https://github.com/cloudflare/kitesurf.git",
   "commit": "4a2903813a22b08d4f3cc64a4b35339d0293a5d1",
-  "workerd": "1.20260911.1",
+  "workerd": "1.20260929.1",
   "compatibilityDate": "2026-09-11",
   "pnpm": "9.15.4",
   "bazel": "9.3.0"
