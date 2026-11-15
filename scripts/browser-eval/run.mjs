@@ -15,8 +15,12 @@ import {snapshot,accumulator} from './resources.mjs';
 import {launch} from './containment.mjs';
 import {createRowTrace} from './trace.mjs';
 import {createCdpRing} from './ring.mjs';
+import {captureNative} from './native.mjs';
 const traceRoot=process.env.BROWSER_EVAL_TRACE_DIR?resolve(process.env.BROWSER_EVAL_TRACE_DIR):null;
 const ringRoot=process.env.BROWSER_EVAL_RING_DIR?resolve(process.env.BROWSER_EVAL_RING_DIR):null;
+const nativeEnabled=process.env.BROWSER_EVAL_NATIVE==='1';
+assert(!process.env.BROWSER_EVAL_NATIVE||nativeEnabled,'Invalid native diagnostic flag');
+assert(!nativeEnabled||(ringRoot&&!traceRoot&&process.env.GITHUB_EVENT_NAME==='workflow_dispatch'),'Native capture requires a manual ring diagnostic');
 assert(!(traceRoot&&ringRoot),'Streaming trace and failure ring modes are mutually exclusive');
 if(traceRoot)await fs.mkdir(traceRoot,{recursive:true});
 
@@ -52,7 +56,8 @@ const report={schema:1,diagnosticOnly:!!(traceRoot||ringRoot),status:'running',s
   ]};
 if(traceRoot)report.notes.unshift('DIAGNOSTIC ONLY: trace observation changes overhead; timings are not performance-qualified and cannot be charted.');
 if(ringRoot){
-  report.diagnosticMode='failure-ring';
+  report.diagnosticMode=nativeEnabled?'failure-ring-native':'failure-ring';
+  if(nativeEnabled)report.notes.unshift('DIAGNOSTIC ONLY: native stacks are captured after failure; native output is bounded and may be incomplete.');
   report.notes.unshift('DIAGNOSTIC ONLY: bounded in-memory CDP ring; failure-only dump, never complete history. Logger overhead can change timing; no performance charts.');
 }
 // FileHandle.writeFile uses its current offset: write by explicit position instead.
@@ -63,8 +68,9 @@ const server=http.createServer((req,res)=>{const name=req.url.slice(1);if(!Objec
 report.supervisorVersion=execFileSync('python3',['--version'],{encoding:'utf8'}).trim();
 report.resourceEnvironment={LD_LIBRARY_PATH:process.env.LD_LIBRARY_PATH??null,TMPDIR:'/tmp',TMP:'/tmp',TEMP:'/tmp'};
 let active,interrupted=false;
+const interruption=new AbortController();
 const terminate=child=>{if(child.exitCode===null&&!child.signalCode)child.kill('SIGTERM');};
-const interrupt=()=>{interrupted=true;if(active)terminate(active);};
+const interrupt=()=>{interrupted=true;interruption.abort();if(active)terminate(active);};
 process.once('SIGINT',interrupt);process.once('SIGTERM',interrupt);
 async function run(engine,workload,phase,pass,trial,base){
   assert(!interrupted,'Evaluation interrupted');
@@ -86,7 +92,7 @@ async function run(engine,workload,phase,pass,trial,base){
     const args=engine.id==='kitesurf'?['--experimental',`--socket-addr=http=127.0.0.1:${port}`]:engine.id==='lightpanda'?['serve','--host','127.0.0.1','--port',String(port)]:['--headless=new','--disable-gpu','--no-sandbox','--disable-dev-shm-usage','--no-first-run','--no-default-browser-check','--disable-sync','--disable-background-networking','--disable-component-update','--no-proxy-server',`--user-data-dir=${profile}`,`--remote-debugging-port=${port}`];
     row.args=args;
     const start=performance.now(); let spawnError,stderr='';
-    containment=launch(engine.binary,args,{...process.env,TMPDIR:'/tmp',TMP:'/tmp',TEMP:'/tmp'},{captureStdout:!!trace});
+    containment=launch(engine.binary,args,{...process.env,TMPDIR:'/tmp',TMP:'/tmp',TEMP:'/tmp'},{captureStdout:!!trace,captureControl:nativeEnabled});
     child=active=containment.child;
     if(trace)trace.captureStdout(containment.stdout);
     child.on('error',e=>spawnError=e);child.stderr.on('data',x=>{stderr=(stderr+x).slice(-8000);row.stderr=stderr;trace?.stderr(x);});
@@ -124,6 +130,7 @@ async function run(engine,workload,phase,pass,trial,base){
     row.status='failed';row.error=String(e.stack||e);
     if(trace)await trace.captureFailure(supervisorPid);
     if(ring)row.ring=await ring.dumpFailure(ringDirectory,{engine:engine.id,workload,phase,pass,trial,error:row.error,completedMeasuredOperations:row.wallMs.length,stderrTail:row.stderr??''},supervisorPid);
+    if(nativeEnabled&&containment)row.native=await captureNative(containment,{binary:engine.binary,sha256:engine.expectedSha256},{signal:interruption.signal});
     throw e;
   }
   finally{
@@ -152,7 +159,7 @@ async function run(engine,workload,phase,pass,trial,base){
 }
 try{
   for(const engine of config.engines){const digest=await hash(engine.binary);if(engine.expectedSha256)assert.equal(digest,engine.expectedSha256,'Binary digest mismatch');report.engineIdentity.push({id:engine.id,runtimeIdentity:engine.runtimeIdentity,binarySha256:digest});}
-  report.harnessHashes={};for(const file of ['run.mjs','fixtures.mjs','resources.mjs','summary.mjs','chart.mjs','containment.mjs','supervise.py','trace.mjs','ring.mjs'])report.harnessHashes[file]=await hash(new URL(file,import.meta.url));
+  report.harnessHashes={};for(const file of ['run.mjs','fixtures.mjs','resources.mjs','summary.mjs','chart.mjs','containment.mjs','supervise.py','trace.mjs','ring.mjs','native.mjs'])report.harnessHashes[file]=await hash(new URL(file,import.meta.url));
   const port=await listen(server),base=`http://127.0.0.1:${port}`;
   for(let trial=0;trial<trials;trial++) for(const workload of Object.keys(fixtures)) for(const phase of ['cold','warm']) for(const pass of ['latency','resources']){
     const offset=trial%3;

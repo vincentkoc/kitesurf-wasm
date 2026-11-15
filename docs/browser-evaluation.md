@@ -247,3 +247,79 @@ Ring mode does not collect full stdout or full stderr. Its sidecars are retained
 in the existing always-uploaded CI artifact, never either production npm tarball.
 The separate exact-fixture replay artifact remains unchanged. Do not widen timeouts,
 exclude failed rows or infer a root cause solely because a diagnostic mode passes.
+
+### Failure-only native stacks (manual diagnostic)
+
+`diagnostic_native: true` is default-off and requires `diagnostic_ring: true` with
+streaming trace disabled. Normal push/PR runs do not install GDB, start debugger
+helpers, enable supervisor control or capture native stacks. The harness also
+rejects native mode unless `GITHUB_EVENT_NAME=workflow_dispatch`. All such runs
+remain diagnostic-only and cannot produce scored summary charts.
+
+This manual workflow installs GDB in the ephemeral hosted runner only, then runs
+`native-preflight.mjs` against its own synthetic `sleep` child. The preflight records
+GDB version, ptrace policy, actual stack/exit/detach evidence and ECHILD cleanup in
+`artifacts/browser-eval/native-preflight.json`. If attachment is unavailable or the
+preflight fails, the workflow stops before the browser build/campaign. It does not
+change ptrace_scope, file capabilities, global configuration or engine flags.
+
+After an original operation fails, the ring freezes and finishes its separately
+bounded dump first. Native capture then gets at most five additional seconds,
+including supervisor handshake, identity/hash checks, debugger execution and exit
+verification. It does not extend the operation's 15-second deadline. The original
+failure remains failed regardless of the diagnostic result.
+
+The opt-in supervisor control channel ACKs its unreaped direct child's PID,
+start time, UID, PPID and executable device/inode. The hold has no automatic
+expiry: a diagnostic timeout is not proof that a numeric-PID attach has stopped.
+Release is allowed before any debugger could start, or only after its exit has
+been verified. Identity, executable/hash, live state and TracerPid checks precede
+attachment. There is no PID/name search fallback. A hold request whose control-channel caller
+times out remains recorded as abandoned. If its grant arrives late, the control
+owner releases only that abandoned token: it was never delivered, so no debugger
+could have started with it. Already delivered holds retain the exit-proof rule.
+
+GDB is never elevated. In this mode alone, the target's pre-exec hook grants
+`PR_SET_PTRACER` to the existing harness controller and its descendants. This is
+a task-local relationship, not `PR_SET_PTRACER_ANY`; normal targets are unchanged.
+It does not change dumpability, ptrace_scope or capabilities. The hosted preflight
+rejects root, CAP_SYS_PTRACE and policy modes that prohibit this unprivileged
+relationship, rather than escalating or weakening a global guard. See the
+[Linux Yama documentation](https://www.kernel.org/doc/html/latest/admin-guide/LSM/Yama.html).
+
+GDB runs under an independent, unprivileged GNU timeout watchdog in a dedicated
+process group. `--foreground` keeps the watchdog alive to kill and reap GDB
+rather than killing itself; fixed GDB commands cannot spawn shell commands or
+call into the inferior. TERM is followed by KILL after 250 ms. There is no sudo
+debugger proxy or privileged descendant hidden in another process group.
+Initialization files, auto-loading and debuginfod are disabled; only thread
+listings, up to 32 native frames per thread, PC/SP/frame-pointer registers,
+mappings and detach are requested. No breakpoint, continue, inferior function
+call, core dump or runtime modification is requested.
+
+Cancellation and control-channel loss kill the engine and adopted descendants
+immediately, but do not reap its held PID. After a deadline, the result is frozen
+as incomplete while a separate exit observer retains custody. Once debugger
+exit is verified, it releases the hold and the supervisor reaches ECHILD. A late
+release emits a separate custody event; it never promotes the failed/frozen row.
+If exit remains unconfirmed, the existing bounded stop reports cleanup incomplete
+with the held PID and capture token, and the supervisor retains the zombie.
+This deliberately trades bounded physical cleanup for safe PID custody.
+Controller loss can require operator recovery: verify debugger exit before
+terminating its custody supervisor, rather than forcing a potentially unsafe reap.
+
+`row.native` retains at most 1 MiB combined stdout/stderr while the pipes continue
+to drain, plus bytes observed, truncation, target identity, watchdog status, detach
+marker and debugger process-group exit observation. Output-cap, timeout, identity,
+permission, capture and cleanup failures are explicit (`incomplete`/`unavailable`),
+never silently successful. Terminal results are frozen; late I/O cannot promote
+them. A watchdog exit alone is not accepted if observed group members remain.
+Engine cleanup still requires the existing subreaper `waitpid ECHILD` proof.
+
+Native stack symbols and unwind data may identify teardown, compilation, locking
+or event-loop work, but optimized or generated Wasm/JavaScript frames can remain
+unresolved. One snapshot is not proof of a CPU loop or ownership by a particular
+document. Capture overhead is after failure but can still alter the observed
+state. Kernel-uninterruptible work can prevent a physical exit; report that
+limitation instead of claiming complete debugger cleanup. Raw native output is
+retained only as diagnostic evidence, never in production npm tarballs.

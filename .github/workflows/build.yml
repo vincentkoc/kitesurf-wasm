@@ -14,6 +14,11 @@ on:
         required: false
         type: boolean
         default: false
+      diagnostic_native:
+        description: 'Capture bounded native stacks after ring failure (requires diagnostic_ring)'
+        required: false
+        type: boolean
+        default: false
 concurrency:
   group: kitesurf-${{ github.head_ref || github.ref_name }}
   cancel-in-progress: true
@@ -25,14 +30,24 @@ jobs:
     timeout-minutes: 90
     steps:
       - name: Reject conflicting diagnostic modes
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.diagnostic_trace && inputs.diagnostic_ring }}
-        run: echo 'Choose either diagnostic_trace or diagnostic_ring, not both'; exit 1
+        if: ${{ github.event_name == 'workflow_dispatch' && ((inputs.diagnostic_trace && inputs.diagnostic_ring) || (inputs.diagnostic_native && !inputs.diagnostic_ring)) }}
+        run: echo 'Choose trace or ring; native capture requires ring'; exit 1
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: '22.16.0'
           cache: npm
       - run: npm ci
+      - name: Qualify native diagnostics on an owned synthetic child
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.diagnostic_native && inputs.diagnostic_ring && !inputs.diagnostic_trace }}
+        timeout-minutes: 3
+        env:
+          BROWSER_EVAL_NATIVE: '1'
+        run: |
+          sudo -n apt-get update -qq
+          sudo -n apt-get install -y --no-install-recommends gdb
+          mkdir -p artifacts/browser-eval
+          node scripts/browser-eval/native-preflight.mjs --output artifacts/browser-eval/native-preflight.json
       - run: corepack enable
       - run: npm run build
       - name: Patched upstream RPC teardown regressions (Node adapter)
@@ -89,6 +104,7 @@ jobs:
         env:
           BROWSER_EVAL_TRACE_DIR: ${{ github.event_name == 'workflow_dispatch' && inputs.diagnostic_trace && 'artifacts/browser-eval/trace' || '' }}
           BROWSER_EVAL_RING_DIR: ${{ github.event_name == 'workflow_dispatch' && inputs.diagnostic_ring && 'artifacts/browser-eval/ring' || '' }}
+          BROWSER_EVAL_NATIVE: ${{ github.event_name == 'workflow_dispatch' && inputs.diagnostic_native && inputs.diagnostic_ring && !inputs.diagnostic_trace && '1' || '' }}
         shell: bash
         timeout-minutes: 30
         run: |
