@@ -5,6 +5,7 @@ import { cpSync, mkdirSync, readFileSync, readdirSync, writeFileSync, chmodSync,
 import { join, relative, resolve } from 'node:path';
 
 import { applyUpstreamPatch, restoreManagedUpstreamPatch } from './upstream-patch.mjs';
+import { browserV8Flags } from './browser-runtime.mjs';
 
 const root = resolve(import.meta.dirname, '..');
 const lock = JSON.parse(readFileSync(join(root, 'upstream.json')));
@@ -69,6 +70,7 @@ const bindings = Object.entries(values).map(([name, value]) => `(name=${q(name)}
 bindings.push('(name="LOADER",workerLoader=())', '(name="FONT_ASSETS",service="assets")');
 writeFileSync(join(build, 'config.capnp'), `using Workerd = import "/workerd/workerd.capnp";
 const config :Workerd.Config = (
+ v8Flags = ${q(browserV8Flags)},
  services = [
  ${fixture ? '(name="internet",network=(allow=["public","127.0.0.1/32","::1/128"],tlsOptions=(trustBrowserCas=true))),' : ''}
  (name="engine",worker=(modules=[${engine.join(',\n')}],compatibilityDate=${q(lock.compatibilityDate)},compatibilityFlags=[${opts.compatibilityFlags.map(q).join(',')}],bindings=[${bindings.join(',')} ])),
@@ -91,7 +93,7 @@ for (const target of [core, browser]) {
   for (const name of ['LICENSE', 'NOTICE', 'licenses']) cpSync(join(root, name), join(target, name), { recursive: true });
 }
 const hash = file => createHash('sha256').update(readFileSync(file)).digest('hex');
-const provenance = { ...lock, patchSha256: hash(patchFile), node: process.version, platform: process.platform, architecture: process.arch, fixture, binary: { file: relative(browser, binary), sha256: hash(binary) }, coreWasmSha256: hash(join(core, 'vendor/kitesurf_core_bg.wasm')) };
+const provenance = { ...lock, v8Flags: browserV8Flags, patchSha256: hash(patchFile), node: process.version, platform: process.platform, architecture: process.arch, fixture, binary: { file: relative(browser, binary), sha256: hash(binary) }, coreWasmSha256: hash(join(core, 'vendor/kitesurf_core_bg.wasm')) };
 writeFileSync(join(browser, fixture ? 'provenance-fixture.json' : 'provenance.json'), JSON.stringify(provenance, null, 2) + '\n');
 writeFileSync(join(core, 'provenance.json'), JSON.stringify({ ...lock, coreWasmSha256: provenance.coreWasmSha256 }, null, 2) + '\n');
 console.log(JSON.stringify(provenance, null, 2));
