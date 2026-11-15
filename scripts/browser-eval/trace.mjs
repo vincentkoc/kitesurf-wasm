@@ -7,6 +7,23 @@ import {snapshot} from './resources.mjs';
 
 const methods=['goto','evaluate','type','click','$eval'];
 const errorText=error=>{try{return String(error?.stack||error);}catch{return 'Unprintable diagnostic error';}};
+export async function readFailureSnapshot(supervisorPid,{signal}={}) {
+  const check=()=>signal?.throwIfAborted();
+  const read=async path=>{check();try{return await fs.readFile(path,{encoding:'utf8',signal});}catch(error){check();return {error:errorText(error)};}};
+  const host=Object.fromEntries(await Promise.all(
+    ['/proc/meminfo','/proc/loadavg','/proc/pressure/cpu','/proc/pressure/memory','/proc/pressure/io']
+      .map(async path=>[path,await read(path)])));
+  check();
+  let processes;
+  try{processes=supervisorPid?await snapshot(supervisorPid):{error:'Supervisor not started'};}
+  catch(error){processes={error:errorText(error)};}
+  check();
+  const states=processes.members?await Promise.all(processes.members.map(async member=>({
+    pid:member.pid,start:member.start,status:await read('/proc/'+member.pid+'/status'),
+    wchan:await read('/proc/'+member.pid+'/wchan'),
+  }))):[];
+  return {host,processes,states};
+}
 export async function createRowTrace(directory, metadata, {streamFactory=createWriteStream,flushTimeoutMs=5000}={}) {
   // Exclusive row directories prevent a second run from overwriting evidence.
   await fs.mkdir(directory);
@@ -114,18 +131,7 @@ export async function createRowTrace(directory, metadata, {streamFactory=createW
     },
     async captureFailure(supervisorPid) {
       // One failure-only observation; no /proc scans are added to latency operations.
-      const read=async path=>{try{return await fs.readFile(path,'utf8');}catch(error){return {error:errorText(error)};}};
-      const host=Object.fromEntries(await Promise.all(
-        ['/proc/meminfo','/proc/loadavg','/proc/pressure/cpu','/proc/pressure/memory','/proc/pressure/io']
-          .map(async path=>[path,await read(path)])));
-      let processes;
-      try{processes=supervisorPid?await snapshot(supervisorPid):{error:'Supervisor not started'};}
-      catch(error){processes={error:errorText(error)};}
-      const states=processes.members?await Promise.all(processes.members.map(async member=>({
-        pid:member.pid,start:member.start,status:await read('/proc/'+member.pid+'/status'),
-        wchan:await read('/proc/'+member.pid+'/wchan'),
-      }))):[];
-      record({event:'failure-snapshot',host,processes,states});
+      record({event:'failure-snapshot',...await readFailureSnapshot(supervisorPid)});
     },
     close() {
       if(closing)return closing;

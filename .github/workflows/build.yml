@@ -9,6 +9,11 @@ on:
         required: false
         type: boolean
         default: false
+      diagnostic_ring:
+        description: 'Buffer bounded CDP history and dump only after failure (no performance charts)'
+        required: false
+        type: boolean
+        default: false
 concurrency:
   group: kitesurf-${{ github.head_ref || github.ref_name }}
   cancel-in-progress: true
@@ -19,6 +24,9 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
+      - name: Reject conflicting diagnostic modes
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.diagnostic_trace && inputs.diagnostic_ring }}
+        run: echo 'Choose either diagnostic_trace or diagnostic_ring, not both'; exit 1
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
@@ -80,13 +88,14 @@ jobs:
       - name: Five-trial correctness-gated browser workloads
         env:
           BROWSER_EVAL_TRACE_DIR: ${{ github.event_name == 'workflow_dispatch' && inputs.diagnostic_trace && 'artifacts/browser-eval/trace' || '' }}
+          BROWSER_EVAL_RING_DIR: ${{ github.event_name == 'workflow_dispatch' && inputs.diagnostic_ring && 'artifacts/browser-eval/ring' || '' }}
         shell: bash
         timeout-minutes: 30
         run: |
           # Serial on one hosted runner, not an exclusive performance-qualified host.
           node scripts/browser-eval/run.mjs --config artifacts/browser-eval/config.json --output artifacts/browser-eval/raw.json --measurement-window-reserved
           # Trace overhead is diagnostic, never a scored performance comparison.
-          if [ -z "${BROWSER_EVAL_TRACE_DIR:-}" ]; then
+          if [ -z "${BROWSER_EVAL_TRACE_DIR:-}" ] && [ -z "${BROWSER_EVAL_RING_DIR:-}" ]; then
             node scripts/browser-eval/summary.mjs artifacts/browser-eval/raw.json artifacts/browser-eval/summary.json
             for workload in navigation interaction javascript; do
               for phase in cold warm; do

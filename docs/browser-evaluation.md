@@ -193,3 +193,57 @@ always-uploaded `kitesurf-browser-eval-replay` artifact retains the exact fixtur
 fixture provenance, upstream manifest and checksums, including after campaign failure.
 It is test-only replay evidence, never part of either production npm tarball. A build
 that fails before producing a fixture cannot provide an exact binary for replay.
+
+### Low-perturbation failure ring
+
+For failures that disappear with streaming trace enabled, set `BROWSER_EVAL_RING_DIR`
+instead of `BROWSER_EVAL_TRACE_DIR`, or manually dispatch with `diagnostic_ring: true`.
+Both workflow inputs default to false. Selecting both modes is rejected before the
+build; the harness also rejects both environment variables before creating output.
+Normal push and pull-request runs remain untraced and eligible for summary charts.
+
+The ring uses the same built-in Puppeteer logger, but only retains raw CDP strings
+and sequence/monotonic timestamps in memory. It does not parse messages, write files,
+wrap page methods, add per-operation awaits, issue CDP commands or enable engine
+debugging on the hot path. Existing fixture operations, assertions and 15-second
+navigation/protocol deadlines are unchanged. This is lower-perturbation observation,
+not zero-overhead observation: even a ring can change scheduling or memory pressure.
+Every ring-enabled campaign has `diagnosticOnly: true`, including successful ones,
+and the summary tool rejects it. Never present its timings as scored performance.
+
+Each fresh process gets a ring capped at 2,048 messages and 4 MiB of retained UTF-16
+string payload; entry metadata is separately bounded by the entry cap. Oldest entries
+are evicted at either limit. A message larger than the payload cap is dropped whole,
+not sliced into invalid JSON. Counts of received, retained, dropped and oversized
+messages, payload usage and capture errors are explicit in raw-row ring metadata.
+`historyTruncated` records loss, and `completeHistory` is always false: this is only
+recent Puppeteer-connection traffic, not startup or complete engine history.
+
+Successful rows discard the ring without creating sidecars. After a row fails, the
+ring freezes before post-failure work and writes an exclusive row directory:
+
+- `cdp.jsonl`: recent requests, replies and events, preserving request/session/frame/
+  loader IDs. JSON parsing happens only during the failure dump; malformed input is
+  retained as raw text and marks the dump incomplete.
+- `failure.json`: original error, completed measured-operation count, the existing
+  stderr tail, and the same failure-only Linux memory/pressure/process/state snapshot
+  used by streaming trace mode. Unavailable OS data is recorded explicitly.
+- `manifest.json`: bounded-history counters and a provisional `pending` status;
+  completion authority is the owning raw report's `row.ring` (`written` or `incomplete`).
+  A stalled final write can arrive late, so the sidecar never asserts terminal success.
+  A written dump is not a claim of complete history. Dump errors never make a failed
+  workload pass, and capture errors invalidate otherwise successful diagnostic rows.
+
+Snapshot capture and all dump I/O share a separate five-second post-failure budget.
+Timeout returns `incomplete` with `timedOut: true`, aborts supported reads/writes and
+allows containment cleanup to proceed. Later completions cannot mutate the frozen
+raw-row result or advance to another dump stage. The existing process-tree reader
+is not internally cancellable and may finish its scan after expiry; its result is
+ignored. Already-issued native filesystem work may finish or leave partial sidecars;
+it cannot promote the result to success. This budget does not extend the workload's
+15-second deadline.
+
+Ring mode does not collect full stdout or full stderr. Its sidecars are retained only
+in the existing always-uploaded CI artifact, never either production npm tarball.
+The separate exact-fixture replay artifact remains unchanged. Do not widen timeouts,
+exclude failed rows or infer a root cause solely because a diagnostic mode passes.
