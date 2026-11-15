@@ -45,7 +45,8 @@ This comparison uses the same local generated modules; it does not replace clean
   verifies the result; it does not measure physical input or OpenClaw actionability.
 - **CPU:** process-tree CPU counters bracket the complete navigation batch, including the untimed
   DOM assertions. The result is a batch total, not a per-navigation median. Short-lived or exited
-  descendants can be missed; this is explicitly a sampled lower bound.
+  descendants can be missed, and tick quantization can overcount short intervals.
+  This is an incomplete, quantized observation, not an upper or lower bound.
 - **Lifecycle:** the same process stays alive through every navigation. Each navigation records
   current RSS and PSS outside latency measurement. First-page memory, navigation growth, idle,
   page close and connection close remain distinct. Do not restart the process to hide growth.
