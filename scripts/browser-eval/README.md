@@ -130,3 +130,26 @@ reserved host: this is correctness and reproducibility evidence, not a performan
 qualification. Raw/summary JSON, binary hashes, actual version/build identities,
 fixture provenance and SVG/PNG outputs are retained in the existing artifact upload,
 even when the campaign fails (charts require a fully passing campaign).
+
+## Presentation reference and comparison boundary
+
+Use the restrained monochrome, hatched baseline bars and large values from
+Chris Tate's visual announcement as a presentation reference, not a source of
+benchmark numbers: https://x.com/ctatedev/status/2121362980466245787
+
+Vercel agent-browser is a CLI/daemon automation layer (Chromium by default), not
+an independent fourth browser engine. Keep it out of this engine ranking. Any
+future comparison of automation tools must be a separate matched-backend
+workflow test including command/serialization overhead and verified outputs.
+Do not label native CLI process startup as browser startup or carry over the
+announcement's performance ratios.
+
+Detailed charts retain the trial ranges and measurement caveats. To render the
+same validated summary as a 1920×1080 poster (no benchmark rerun):
+
+```sh
+node scripts/browser-eval/chart.mjs summary.json interaction warm poster --poster
+```
+
+Both forms require a fully passing, non-diagnostic summary. Poster bars use the
+same medians and trial min–max as detailed charts; they introduce no speedup claims.

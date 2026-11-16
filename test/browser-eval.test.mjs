@@ -4,7 +4,7 @@ import vm from 'node:vm';
 import {fixtures,operation,fixtureHash} from '../scripts/browser-eval/fixtures.mjs';
 import {parseStat,accumulator} from '../scripts/browser-eval/resources.mjs';
 import {median,summarize} from '../scripts/browser-eval/summary.mjs';
-import {render} from '../scripts/browser-eval/chart.mjs';
+import {render,renderPoster} from '../scripts/browser-eval/chart.mjs';
 // Synthetic reducer fixtures are test-only, never benchmark evidence or exported claims.
 function synthetic(){
   const report={schema:1,status:'passed',fixtureHash,config:{trials:3,repetitions:2},host:{arch:'test',kernel:'test',cpu:'synthetic'},started:'test-only',engineIdentity:['kitesurf','chromium','lightpanda'].map(id=>({id,runtimeIdentity:'TEST ONLY',binarySha256:'a'.repeat(64)})),runs:[]};
@@ -13,7 +13,7 @@ function synthetic(){
 }
 test('summary is balanced, median of trial medians, deterministic',()=>{
   assert.equal(median([1,2,20,30]),11);const s=summarize(synthetic());assert.equal(s.cells.length,18);assert.equal(s.cells.find(x=>x.phase==='warm').wallMs.median,16);
-  s.sourceSha256='b'.repeat(64);assert.equal(render(s,'interaction','warm'),render(s,'interaction','warm'));assert.match(render(s,'interaction','warm'),/Observed CPU \(quantized, incomplete\)/);
+  s.sourceSha256='b'.repeat(64);assert.equal(render(s,'interaction','warm'),render(s,'interaction','warm'));assert.match(render(s,'interaction','warm'),/Observed CPU \(quantized, incomplete\)/);assert.match(render(s,'interaction','warm'),/baseline-hatch/);assert.doesNotMatch(render(s,'interaction','warm'),/agent-browser/);
 });
 test('failed, missing, duplicate and invalid rows never become wins',()=>{
   let r=synthetic();r.status='failed';assert.throws(()=>summarize(r));
@@ -24,6 +24,20 @@ test('failed, missing, duplicate and invalid rows never become wins',()=>{
   r=synthetic();r.runs.find(x=>x.pass==='resources').resources.complete=false;assert.throws(()=>summarize(r));
   r=synthetic();delete r.runs[0].cleanup;assert.throws(()=>summarize(r));
   const s=summarize(synthetic());assert.throws(()=>render(s,'interaction','warm'));
+});
+test('16:9 poster preserves measured values and comparison boundaries',()=>{
+  const s=summarize(synthetic());s.sourceSha256='b'.repeat(64);
+  const svg=renderPoster(s,'interaction','warm');
+  assert.match(svg,/width="1920" height="1080"/);
+  assert.match(svg,/baseline-hatch/);
+  assert.match(svg,/CPU is quantized\/incomplete/);
+  assert.match(svg,/Shared runner/);
+  for(const label of ['Kitesurf WASM','Chrome / Chromium','Lightpanda'])assert(svg.includes(label));
+  for(const row of s.cells.filter(r=>r.workload==='interaction'&&r.phase==='warm'))
+    for(const key of ['wallMs','sampledPeakRssMiB','observedCpuMsPerOp'])assert(svg.includes('>'+row[key].median.toFixed(1)+'</text>'));
+  assert.doesNotMatch(svg,/agent-browser|faster|smaller/);
+  assert.equal(svg,renderPoster(s,'interaction','warm'));
+  s.status='failed';assert.throws(()=>renderPoster(s,'interaction','warm'));
 });
 test('Observed CPU preserves observed departed processes and PID reuse',()=>{
   const a=accumulator({complete:true,members:[{pid:1,start:'1',ticks:100}]},100);
