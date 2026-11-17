@@ -35,6 +35,20 @@ CI runs all 28 adapter tests directly against the patched source in Node. This i
 cleanup correctness fix, not evidence that the remaining native-isolate retention or RSS
 growth is resolved; an in-flight remote call can retain references independently.
 
+The patch also loads each PageScript generation through a loopback `PageScriptLoader`
+entrypoint (`ctx.exports`) instead of calling `LOADER.load` from the CDP connection's request
+context. The host-side worker stub and entrypoint `Fetcher` then belong to that loader call;
+once the generation's kill settles, the engine disposes the returned session and control stubs
+and the loader context ends, releasing the retired page isolate. Before, those stubs lived in
+the WebSocket connection's context and kept every retired page isolate until host GC happened
+to finalize them or the connection closed. The loader builds the outbound, tails, span sink and
+shared WASM module in its own context because a compiled module, a received `Fetcher` used as
+`globalOutbound`, and a dynamic worker entrypoint cannot cross JSRPC. The session stub is
+returned directly; a proxying `RpcTarget` doubled per-call latency. Embedders that wrap the
+engine must export `PageScriptLoader` from their main module, as they already export
+`SandboxOutbound` and `PageScriptTail`. Dedicated workers and page renderers still load from
+the connection context.
+
 The production smoke checks navigation-global isolation, concurrent-tab isolation, input,
 click handlers, rendering and tab closure. The corrected evaluator measures the remaining
 memory growth separately; this patch is not a claim of leak-free or constant-memory browsing.
