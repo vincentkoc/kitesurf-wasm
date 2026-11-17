@@ -1,3 +1,50 @@
+diff --git a/packages/engine/src/embed.ts b/packages/engine/src/embed.ts
+index 94b07b4..2ca4913 100644
+--- a/packages/engine/src/embed.ts
++++ b/packages/engine/src/embed.ts
+@@ -8,6 +8,7 @@ export {
+   KitesurfEngine,
+   SandboxOutbound,
+   PageScriptTail,
++  PageScriptLoader,
+   DeniedOutbound,
+   SpanSink,
+ } from "./index.ts";
+diff --git a/packages/engine/src/eval/outbound.ts b/packages/engine/src/eval/outbound.ts
+index 5010b60..71a57b0 100644
+--- a/packages/engine/src/eval/outbound.ts
++++ b/packages/engine/src/eval/outbound.ts
+@@ -202,6 +202,8 @@ export interface SandboxOutboundOverride {
+   readonly external: boolean;
+   parent(props: CallerOutboundProps): Fetcher;
+   loaded(props: CallerOutboundProps): Fetcher;
++  /** The props `loaded` binds, for a loader that builds the same outbound in its own context. */
++  loadedProps(props: CallerOutboundProps): OutboundProps;
+   session(props: CallerOutboundProps): SessionOutbound;
+   final(request: Request): Promise<Response>;
+ }
+@@ -286,6 +288,10 @@ export function createSandboxOutboundOverride(
+     egress: externalOutbound ? undefined : egress,
+     engineIsolateId: engineIsolateId(),
+   });
++  const loadedProps = (props: CallerOutboundProps): OutboundProps => ({
++    ...seal(props),
++    pageRealm: true,
++  });
+   return {
+     external: externalOutbound !== undefined,
+     parent(props) {
+@@ -295,8 +301,9 @@ export function createSandboxOutboundOverride(
+       } as Fetcher;
+     },
+     loaded(props) {
+-      return exports.SandboxOutbound({ props: { ...seal(props), pageRealm: true } });
++      return exports.SandboxOutbound({ props: loadedProps(props) });
+     },
++    loadedProps,
+     session(props) {
+       const sealed = { ...seal(props), pageRealm: true };
+       return async (req) =>
 diff --git a/packages/engine/src/eval/page-renderer.ts b/packages/engine/src/eval/page-renderer.ts
 index 8e5bfea..ff80669 100644
 --- a/packages/engine/src/eval/page-renderer.ts
@@ -29,43 +76,192 @@ index 8e5bfea..ff80669 100644
      },
      env: {
        KS_TAIL_TOKEN: tailToken,
-diff --git a/packages/engine/src/eval/page-script.ts b/packages/engine/src/eval/page-script.ts
-index 81e7f33..7ea26c5 100644
---- a/packages/engine/src/eval/page-script.ts
-+++ b/packages/engine/src/eval/page-script.ts
-@@ -7,6 +7,7 @@
- import type Protocol from "devtools-protocol";
- import { pageIsolateEntry } from "./page-isolate-entry.ts";
- import wasmGlueSource from "../../../core/pkg/kitesurf_core.glue.js";
+diff --git a/packages/engine/src/eval/page-script-loader.ts b/packages/engine/src/eval/page-script-loader.ts
+new file mode 100644
+index 0000000..4e6eeb1
+--- /dev/null
++++ b/packages/engine/src/eval/page-script-loader.ts
+@@ -0,0 +1,109 @@
++// Copyright (c) 2026 Cloudflare, Inc.
++// Licensed under the Apache 2.0 license found in the LICENSE file or at:
++// https://opensource.org/licenses/Apache-2.0
++
++// Loads each PageScript generation in its own loopback request context. A worker stub held by the
++// long-lived CDP connection kept every retired page isolate resident until host GC or disconnect;
++// here the isolate's lifetime ends when the caller disposes the returned session and control stubs.
++
++import { RpcTarget, WorkerEntrypoint } from "cloudflare:workers";
++import type { OpenSessionInit, PageScriptEntrypoint } from "@kitesurf/jsrpc-types/page-script";
++import type { OutboundProps } from "./outbound.ts";
++import {
++  attributionTails,
++  type AttributionTailExports,
++  type AttributionTailProps,
++} from "./attribution-tail.ts";
++import type { PageScriptTailProps } from "./page-script-tail.ts";
++import type { RpcSessionCallable, RpcSessionEntrypoint } from "./page-script-rpc-session.ts";
++import { STATIC_PAGE_SCRIPT_MODULES } from "./page-script-modules.ts";
++
++export type PageScriptLoadModule =
++  | string
++  | { wasm: ArrayBuffer }
++  | { cjs: string }
++  | { js: string }
++  | { json: unknown };
++
++/** Serializable description of one generation; static engine modules are added by the loader. */
++export interface PageScriptLoadSpec {
++  compatibilityDate: string;
++  compatibilityFlags: string[];
++  mainModule: string;
++  modules: Record<string, PageScriptLoadModule>;
++  outboundProps: OutboundProps;
++  tail: PageScriptTailProps;
++  attributionTail?: AttributionTailProps;
++  spanSinkProps?: { kind: string } & Record<string, unknown>;
++  limits: { cpuMs?: number; subRequests?: number };
++  entrypointProps: Record<string, unknown>;
++}
++
++export interface LoadedPageScript {
++  session: RpcSessionCallable;
++  control: LoadedPageScriptControl;
++}
++
++type LoaderExports = AttributionTailExports & {
++  SandboxOutbound(opts: { props: OutboundProps }): Fetcher;
++  PageScriptTail(opts: { props: PageScriptTailProps }): Fetcher;
++  SpanSink(opts: { props: Record<string, unknown> }): unknown;
++};
++
++interface LoaderEnv {
++  LOADER: WorkerLoader;
++  HOST_TRACER?: unknown;
++}
++
++/** Kill switch for one loaded generation. Disposing it lets the loader context end. */
++export class LoadedPageScriptControl extends RpcTarget {
++  #entrypoint: Fetcher<PageScriptEntrypoint> | null;
++
++  constructor(entrypoint: Fetcher<PageScriptEntrypoint>) {
++    super();
++    this.#entrypoint = entrypoint;
++  }
++
++  async killIsolate(reason?: string): Promise<void> {
++    await this.#entrypoint?.killIsolate(reason);
++  }
++
++  [Symbol.dispose](): void {
++    this.#entrypoint = null;
++  }
++}
++
++export class PageScriptLoader extends WorkerEntrypoint<LoaderEnv> {
++  async open(spec: PageScriptLoadSpec, init: OpenSessionInit): Promise<LoadedPageScript> {
++    const exports = (this.ctx as ExecutionContext & { exports: LoaderExports }).exports;
++    const tails: Fetcher[] = [
++      exports.PageScriptTail({ props: spec.tail }),
++      ...(spec.attributionTail
++        ? attributionTails(exports, spec.attributionTail.headers, spec.attributionTail.scriptName)
++        : []),
++    ];
++    const stub = this.env.LOADER.load({
++      compatibilityDate: spec.compatibilityDate,
++      compatibilityFlags: spec.compatibilityFlags,
++      mainModule: spec.mainModule,
++      // Engine modules win, as in pageIsolateEntry.
++      modules: { ...spec.modules, ...STATIC_PAGE_SCRIPT_MODULES },
++      env: {
++        ...(this.env.HOST_TRACER && spec.spanSinkProps
++          ? { KS_SPAN_SINK: exports.SpanSink({ props: spec.spanSinkProps }) }
++          : {}),
++      },
++      globalOutbound: exports.SandboxOutbound({ props: spec.outboundProps }),
++      tails,
++      limits: spec.limits,
++    });
++    const entrypoint = stub.getEntrypoint<PageScriptEntrypoint>("PageScript", {
++      props: spec.entrypointProps,
++    });
++    // SAFETY: WorkerLoader follows the PageScript JSRPC contract; Rpc.Provider only loses generic
++    // call/reply correlation. Verified by: packages/engine/test/e2e/demos/page-script-demo.e2e.test.ts.
++    const opener = entrypoint as RpcSessionEntrypoint;
++    const session = await opener.openSession(init);
++    return { session, control: new LoadedPageScriptControl(entrypoint) };
++  }
++}
+diff --git a/packages/engine/src/eval/page-script-modules.ts b/packages/engine/src/eval/page-script-modules.ts
+new file mode 100644
+index 0000000..12aa379
+--- /dev/null
++++ b/packages/engine/src/eval/page-script-modules.ts
+@@ -0,0 +1,23 @@
++// Copyright (c) 2026 Cloudflare, Inc.
++// Licensed under the Apache 2.0 license found in the LICENSE file or at:
++// https://opensource.org/licenses/Apache-2.0
++
++// Engine-owned modules shared by every PageScript generation.
++
++import wasmGlueSource from "../../../core/pkg/kitesurf_core.glue.js";
 +import coreWasmModule from "../../../core/pkg/kitesurf_core_bg.wasm";
- import { DOM_SHIM_SOURCE } from "@kitesurf/dom-shim";
- import { INTERNAL_STATE_SOURCE, PAGE_SCRIPT_SOURCE } from "@kitesurf/page-script";
- import type { RenderPortStub } from "@kitesurf/jsrpc-types/page-renderer";
-@@ -300,13 +301,18 @@ export const insertedBaked = ${JSON.stringify(scriptBundle?.insertedManifest ??
- 
-   const modules: Record<
-     string,
--    string | { wasm: ArrayBuffer } | { cjs: string } | { js: string } | { json: unknown }
-+    | string
-+    | { wasm: ArrayBuffer | WebAssembly.Module }
-+    | { cjs: string }
-+    | { js: string }
-+    | { json: unknown }
-   > = {
-     "page.js": PAGE_SCRIPT_SOURCE,
-     "dom-shim.js": DOM_SHIM_SOURCE,
-     "internal-state.js": INTERNAL_STATE_SOURCE,
-     "wasm-glue.js": wasmGlueSource,
--    "core_bg.wasm": { wasm: loadWasmBytesFromVfs() },
-+    // Share compiled code, never the per-page instance or its linear memory.
-+    "core_bg.wasm": { wasm: coreWasmModule },
-     "__ks_startup_probe_input.js": startupInputModule,
-     "__ks_import_map.js": scriptBundle?.importMapModuleSource ?? FALLBACK_MODULE_RESOLVER_SOURCE,
-   };
++import { DOM_SHIM_SOURCE } from "@kitesurf/dom-shim";
++import { INTERNAL_STATE_SOURCE, PAGE_SCRIPT_SOURCE } from "@kitesurf/page-script";
++
++// Added by the loader rather than sent per generation: a compiled module cannot cross JSRPC,
++// and the sources would otherwise be copied on every navigation.
++export const STATIC_PAGE_SCRIPT_MODULES: Readonly<
++  Record<string, string | { wasm: WebAssembly.Module }>
++> = Object.freeze({
++  "page.js": PAGE_SCRIPT_SOURCE,
++  "dom-shim.js": DOM_SHIM_SOURCE,
++  "internal-state.js": INTERNAL_STATE_SOURCE,
++  "wasm-glue.js": wasmGlueSource,
++  // Share compiled code, never the per-page instance or its linear memory.
++  "core_bg.wasm": { wasm: coreWasmModule },
++});
 diff --git a/packages/engine/src/eval/page-script-rpc-session.ts b/packages/engine/src/eval/page-script-rpc-session.ts
+index b364501..b61ba4c 100644
 --- a/packages/engine/src/eval/page-script-rpc-session.ts
 +++ b/packages/engine/src/eval/page-script-rpc-session.ts
-@@ -339,10 +339,12 @@
+@@ -32,6 +32,8 @@ export type RpcSessionCallable = Pick<RetainedPageScriptSessionStub, "close"> &
+ export interface RpcSessionEntrypoint {
+   openSession(init: OpenSessionInit): Promise<RpcSessionCallable>;
+   killIsolate?(reason?: string): Promise<unknown>;
++  /** Drops what keeps the loaded isolate resident; runs once, after the kill settles. */
++  release?(): void;
+ }
+ 
+ export interface PageScriptRpcSessionOptions {
+@@ -322,13 +324,20 @@ export class PageScriptRpcSession implements PageScriptStub {
+     // Give the retained close one grace window before the entrypoint kill, unless nothing waits on
+     // the close: until the kill lands, the isolate keeps holding a loaded-worker slot.
+     const sessionClosed = opts.atOnce ? Promise.resolve() : (this.closeReady ?? Promise.resolve());
+-    this.killing = settleTeardownWithin(sessionClosed).then(() => {
+-      if (this.isolateGone) return;
+-      this.isolateGone = true;
+-      try {
+-        return settleTeardownWithin(Promise.resolve(ep.killIsolate?.(reason)));
+-      } catch {}
+-    });
++    this.killing = settleTeardownWithin(sessionClosed)
++      .then(() => {
++        if (this.isolateGone) return;
++        this.isolateGone = true;
++        try {
++          return settleTeardownWithin(Promise.resolve(ep.killIsolate?.(reason)));
++        } catch {}
++      })
++      .finally(() => {
++        // A retired generation must not stay resident until the connection ends.
++        try {
++          ep.release?.();
++        } catch {}
++      });
+     return this.killing;
+   }
+ 
+@@ -339,10 +348,12 @@ export class PageScriptRpcSession implements PageScriptStub {
        const dispose = () => disposeStub(session);
        if (typeof session.close === "function") {
          try {
@@ -80,10 +276,270 @@ diff --git a/packages/engine/src/eval/page-script-rpc-session.ts b/packages/engi
          } catch {
            dispose();
            return Promise.resolve();
+diff --git a/packages/engine/src/eval/page-script.ts b/packages/engine/src/eval/page-script.ts
+index 81e7f33..6a78f61 100644
+--- a/packages/engine/src/eval/page-script.ts
++++ b/packages/engine/src/eval/page-script.ts
+@@ -6,14 +6,16 @@
+ 
+ import type Protocol from "devtools-protocol";
+ import { pageIsolateEntry } from "./page-isolate-entry.ts";
+-import wasmGlueSource from "../../../core/pkg/kitesurf_core.glue.js";
+-import { DOM_SHIM_SOURCE } from "@kitesurf/dom-shim";
+-import { INTERNAL_STATE_SOURCE, PAGE_SCRIPT_SOURCE } from "@kitesurf/page-script";
++import { STATIC_PAGE_SCRIPT_MODULES } from "./page-script-modules.ts";
++import type {
++  LoadedPageScript,
++  PageScriptLoadModule,
++  PageScriptLoadSpec,
++} from "./page-script-loader.ts";
+ import type { RenderPortStub } from "@kitesurf/jsrpc-types/page-renderer";
+ import type { SandboxRestrictions } from "@kitesurf/script-gate";
+ import type {
+-  PageScriptEntrypoint,
+-  PageScriptEntrypointStub,
++  OpenSessionInit,
+   PageScriptSession,
+   ReceivedUpstreamParams,
+   UpstreamEventName,
+@@ -29,7 +31,6 @@ import type {
+   PackedException,
+   PackedResult,
+ } from "@kitesurf/jsrpc-types/shared";
+-import type { OutboundProps } from "./outbound.ts";
+ import {
+   openPageScriptRpcSession,
+   type RpcSessionCallable,
+@@ -38,7 +39,6 @@ import {
+ import { traceSpan, type Tracer } from "../tracing.ts";
+ import { localTraceParentProps } from "../tracing-local.ts";
+ import { MAX_DOCUMENT_BYTES } from "../read-capped.ts";
+-import { attributionTails, type AttributionTailExports } from "./attribution-tail.ts";
+ import { makeWallClock, type HostClock } from "./host-clock.ts";
+ import type { SandboxOutboundOverride } from "./outbound.ts";
+ import fs from "node:fs";
+@@ -75,19 +75,12 @@ export interface PageScriptStub extends PageScriptSession {
+   getRenderPort(): Promise<RenderPortStub>;
+ }
+ 
++interface PageScriptLoaderStub {
++  open(spec: PageScriptLoadSpec, init: OpenSessionInit): Promise<LoadedPageScript>;
++}
++
+ type CtxWithExports = ExecutionContext & {
+-  exports: AttributionTailExports & {
+-    SandboxOutbound(opts: { props: OutboundProps }): Fetcher;
+-    PageScriptTail(opts: {
+-      props: {
+-        scriptName: string;
+-        pageDomain?: string;
+-        ksErrToken?: string;
+-        sessionId?: string;
+-      };
+-    }): Fetcher;
+-    SpanSink(opts: { props: { kind: string } }): unknown;
+-  };
++  exports: { PageScriptLoader: PageScriptLoaderStub };
+ };
+ 
+ export const PAGE_SCRIPT_COMPAT_DATE = "2026-09-11";
+@@ -298,15 +291,8 @@ export const metaCsp = ${JSON.stringify(metaCsp)};
+ export const insertedBaked = ${JSON.stringify(scriptBundle?.insertedManifest ?? [])};
+ `;
+ 
+-  const modules: Record<
+-    string,
+-    string | { wasm: ArrayBuffer } | { cjs: string } | { js: string } | { json: unknown }
+-  > = {
+-    "page.js": PAGE_SCRIPT_SOURCE,
+-    "dom-shim.js": DOM_SHIM_SOURCE,
+-    "internal-state.js": INTERNAL_STATE_SOURCE,
+-    "wasm-glue.js": wasmGlueSource,
+-    "core_bg.wasm": { wasm: loadWasmBytesFromVfs() },
++  const modules: Record<string, PageScriptLoadModule | { wasm: WebAssembly.Module }> = {
++    ...STATIC_PAGE_SCRIPT_MODULES,
+     "__ks_startup_probe_input.js": startupInputModule,
+     "__ks_import_map.js": scriptBundle?.importMapModuleSource ?? FALLBACK_MODULE_RESOLVER_SOURCE,
+   };
+@@ -373,55 +359,44 @@ export const manifest = ${JSON.stringify(wasmBake ? wasmBake.manifest : {})};
+     pixelFree,
+   };
+   const mainModule = pageIsolateEntry(modules, pageIsolate);
+-  const stub = env.LOADER.load({
++  // The loader adds the static engine modules itself (see page-script-modules.ts).
++  const generationModules: Record<string, PageScriptLoadModule> = {};
++  for (const [moduleName, source] of Object.entries(modules)) {
++    if (moduleName in STATIC_PAGE_SCRIPT_MODULES) continue;
++    if (typeof source === "object" && "wasm" in source && !(source.wasm instanceof ArrayBuffer)) {
++      throw new Error(`PageScript module ${moduleName} must be wasm bytes to reach the loader`);
++    }
++    generationModules[moduleName] = source as PageScriptLoadModule;
++  }
++  const spec: PageScriptLoadSpec = {
+     compatibilityDate: PAGE_SCRIPT_COMPAT_DATE,
+     compatibilityFlags: [...PAGE_SCRIPT_COMPAT_FLAGS],
+     mainModule,
+-    modules,
++    modules: generationModules,
+     // Page modules run in this worker and can import its env, so the tail
+     // token goes in the entrypoint props below instead.
+-    env: {
+-      ...(env.HOST_TRACER
+-        ? {
+-            KS_SPAN_SINK: cx.exports.SpanSink({
+-              props: { kind: "pagescript", ...localTraceParentProps() },
+-            }),
+-          }
+-        : {}),
++    ...(env.HOST_TRACER
++      ? { spanSinkProps: { kind: "pagescript", ...localTraceParentProps() } }
++      : {}),
++    outboundProps: sandboxOutbound.loadedProps(outboundProps),
++    tail: {
++      scriptName: name,
++      // Navigate-time domain for error reports; a
++      // [ks-err] report's live pageUrl wins over it (SPA routing).
++      pageDomain: hostnameOf(url ?? ""),
++      ksErrToken: tailToken,
++      sessionId: key.connectionId,
+     },
+-    globalOutbound: sandboxOutbound.loaded(outboundProps),
+-    tails: [
+-      cx.exports.PageScriptTail({
+-        props: {
+-          scriptName: name,
+-          // Navigate-time domain for error reports; a
+-          // [ks-err] report's live pageUrl wins over it (SPA routing).
+-          pageDomain: hostnameOf(url ?? ""),
+-          ksErrToken: tailToken,
+-          sessionId: key.connectionId,
+-        },
+-      }),
+-      ...attributionTails(cx.exports, attributionHeaders, "kitesurf-page-script"),
+-    ],
++    ...(Object.keys(attributionHeaders).length > 0
++      ? { attributionTail: { headers: attributionHeaders, scriptName: "kitesurf-page-script" } }
++      : {}),
+     limits: {
+       cpuMs: caps.cpuMs,
+       subRequests: PAGE_SCRIPT_SUBREQUEST_CAP,
+     },
+-  });
+-
+-  const workerEntrypoint: PageScriptEntrypointStub = stub.getEntrypoint<PageScriptEntrypoint>(
+-    "PageScript",
+-    {
+-      props: { KS_TAIL_TOKEN: tailToken, KS_ISOLATE_STAMP: isolateStamp },
+-    },
+-  );
+-  // The RPC adapter needs promises; the local entrypoint contract is synchronous.
+-
+-  // SAFETY: WorkerLoader follows the PageScript JSRPC contract, but Rpc.Provider loses generic
+-  // call/reply correlation and annotates cloneable reply objects with Disposable.
+-  // Runtime replies remain PageScriptReply data.
+-  // Verified by: packages/engine/test/e2e/demos/page-script-demo.e2e.test.ts.
+-  const entrypoint = workerEntrypoint as RpcSessionEntrypoint;
++    entrypointProps: { KS_TAIL_TOKEN: tailToken, KS_ISOLATE_STAMP: isolateStamp },
++  };
++  const entrypoint = loaderOwnedEntrypoint(cx.exports.PageScriptLoader, spec);
+   const tracer = env.HOST_TRACER;
+   const spanWrap = tracer
+     ? (open: () => Promise<RpcSessionCallable>) =>
+@@ -449,6 +424,47 @@ export const manifest = ${JSON.stringify(wasmBake ? wasmBake.manifest : {})};
+   return session;
+ }
+ 
++/**
++ * Opens a generation through the loopback PageScriptLoader so its isolate is released when the
++ * generation is torn down, not when the connection ends or host GC finalizes a worker stub.
++ */
++function loaderOwnedEntrypoint(
++  // The local contract, not the generated loopback type: the session reply is the raw JSRPC stub.
++  loader: PageScriptLoaderStub,
++  spec: PageScriptLoadSpec,
++): RpcSessionEntrypoint {
++  let loaded: LoadedPageScript | null = null;
++  let released = false;
++  const disposeLoaded = (value: LoadedPageScript) => {
++    for (const stub of [value.control, value.session, value]) {
++      try {
++        (stub as { [Symbol.dispose]?: () => void })[Symbol.dispose]?.();
++      } catch {}
++    }
++  };
++  return {
++    async openSession(init) {
++      const value = await loader.open(spec, init);
++      if (released) {
++        disposeLoaded(value);
++        throw new Error("PageScript generation released before its session opened");
++      }
++      loaded = value;
++      return value.session;
++    },
++    killIsolate(reason) {
++      return loaded ? loaded.control.killIsolate(reason) : Promise.resolve();
++    },
++    release() {
++      if (released) return;
++      released = true;
++      const value = loaded;
++      loaded = null;
++      if (value) disposeLoaded(value);
++    },
++  };
++}
++
+ export interface PageScriptInitTimings {
+   wsUpgradeMs?: number;
+ }
+diff --git a/packages/engine/src/index.ts b/packages/engine/src/index.ts
+index 389165b..94d86c3 100644
+--- a/packages/engine/src/index.ts
++++ b/packages/engine/src/index.ts
+@@ -23,6 +23,8 @@ export { SandboxOutbound } from "./eval/outbound.ts";
+ export { DeniedOutbound } from "./eval/denied-outbound.ts";
+ export { SpanSink } from "./eval/span-sink.ts";
+ export { PageScriptTail } from "./eval/page-script-tail.ts";
++// Loopback owner of each PageScript generation's WorkerLoader isolate.
++export { PageScriptLoader } from "./eval/page-script-loader.ts";
+ 
+ // `Env` is generated from wrangler.jsonc; rerun type generation after changing bindings.
+ 
+diff --git a/packages/engine/test/frame-page-script.test.ts b/packages/engine/test/frame-page-script.test.ts
+index b6dae2e..6d59baf 100644
+--- a/packages/engine/test/frame-page-script.test.ts
++++ b/packages/engine/test/frame-page-script.test.ts
+@@ -20,9 +20,9 @@ it("seals a frame isolate's outbound with its browser context's cookie jar", ()
+   // oxlint-disable-next-line kitesurf/no-chained-type-assertions -- only the props capture is needed.
+   const sandboxOutbound = {
+     external: false,
+-    loaded: (props: CallerOutboundProps) => {
++    loadedProps: (props: CallerOutboundProps) => {
+       sealed.push(props);
+-      return {} as Fetcher;
++      return props;
+     },
+     session: (props: CallerOutboundProps) => {
+       sealed.push(props);
+@@ -36,8 +36,10 @@ it("seals a frame isolate's outbound with its browser context's cookie jar", ()
+         load: () => ({ getEntrypoint: () => ({ openSession: () => new Promise(() => {}) }) }),
+       } as unknown as WorkerLoader,
+     },
+-    // oxlint-disable-next-line kitesurf/no-chained-type-assertions -- only the tail export is read.
+-    { exports: { PageScriptTail: () => ({}) } } as unknown as ExecutionContext,
++    // oxlint-disable-next-line kitesurf/no-chained-type-assertions -- a loader that never answers.
++    {
++      exports: { PageScriptLoader: { open: () => new Promise(() => {}) } },
++    } as unknown as ExecutionContext,
+     {
+       connectionId: "conn",
+       targetId: "T",
 diff --git a/packages/engine/test/page-script-rpc-session.test.ts b/packages/engine/test/page-script-rpc-session.test.ts
+index 8586a68..4a0cc29 100644
 --- a/packages/engine/test/page-script-rpc-session.test.ts
 +++ b/packages/engine/test/page-script-rpc-session.test.ts
-@@ -486,3 +486,153 @@
+@@ -486,3 +486,220 @@ describe("PageScriptRpcSession", () => {
      expect(fake.portsDisposed).toBe(1);
    });
  });
@@ -237,3 +693,116 @@ diff --git a/packages/engine/test/page-script-rpc-session.test.ts b/packages/eng
 +    }
 +  });
 +});
++
++describe("loader-owned generation release", () => {
++  it("releases the loaded generation once, after the kill settles", async () => {
++    const order: string[] = [];
++    const fake = makeFake();
++    fake.entrypoint.killIsolate = async () => {
++      order.push("kill");
++    };
++    fake.entrypoint.release = () => {
++      order.push("release");
++    };
++    const s = openPageScriptRpcSession(fake.entrypoint);
++    await s.syncCookies("warm=up");
++    s.close("generation bump");
++    await s.killIsolate("generation bump");
++    await s.killIsolate("again");
++    expect(order).toEqual(["kill", "release"]);
++  });
++
++  it("releases even when the kill rejects or never settles", async () => {
++    vi.useFakeTimers();
++    try {
++      for (const kill of [
++        async () => {
++          throw new Error("kill failed");
++        },
++        () => new Promise<void>(() => {}),
++      ]) {
++        let released = 0;
++        const fake = makeFake({ onClose: () => new Promise(() => {}) });
++        fake.entrypoint.killIsolate = kill;
++        fake.entrypoint.release = () => {
++          released += 1;
++        };
++        const s = openPageScriptRpcSession(fake.entrypoint);
++        await s.syncCookies("warm=up");
++        s.close("generation bump");
++        const killing = s.killIsolate("generation bump");
++        await vi.advanceTimersByTimeAsync(2_000);
++        await killing;
++        expect(released).toBe(1);
++      }
++    } finally {
++      vi.useRealTimers();
++    }
++  });
++
++  it("releases an isolate already known to be gone without killing it", async () => {
++    let killed = 0;
++    let released = 0;
++    const s = openPageScriptRpcSession({
++      openSession: async () => {
++        throw new Error("open failed");
++      },
++      killIsolate: async () => {
++        killed += 1;
++      },
++      release: () => {
++        released += 1;
++      },
++    });
++    await expect(s.syncCookies("warm=up")).rejects.toThrow();
++    await s.killIsolate("generation bump");
++    expect(killed).toBe(0);
++    expect(released).toBe(1);
++  });
++});
+diff --git a/packages/engine/test/prefetch-wasm.test.ts b/packages/engine/test/prefetch-wasm.test.ts
+index d4d485c..7a98385 100644
+--- a/packages/engine/test/prefetch-wasm.test.ts
++++ b/packages/engine/test/prefetch-wasm.test.ts
+@@ -4,6 +4,7 @@
+ 
+ import { it, expect, vi } from "vitest";
+ 
++import type { CallerOutboundProps } from "../src/eval/outbound.ts";
+ import { prefetchWasmModules, scanForWasmUrls } from "../src/eval/prefetch-wasm.ts";
+ 
+ const MIB = 1024 * 1024;
+@@ -19,7 +20,12 @@ function wasmModule(size: number): Uint8Array {
+ const miss = async () => new Response(null, { status: 404 });
+ function stubOutbound(routes: Record<string, () => Response>) {
+   const fetcher = { fetch: async (req: Request) => routes[req.url]?.() ?? miss() } as Fetcher;
+-  const base = { external: false, parent: () => fetcher, loaded: () => fetcher };
++  const base = {
++    external: false,
++    parent: () => fetcher,
++    loaded: () => fetcher,
++    loadedProps: (props: CallerOutboundProps) => props,
++  };
+   return { ...base, session: () => miss, final: miss };
+ }
+ 
+diff --git a/packages/engine/test/walk-module-graph.test.ts b/packages/engine/test/walk-module-graph.test.ts
+index abfde6d..2ec9430 100644
+--- a/packages/engine/test/walk-module-graph.test.ts
++++ b/packages/engine/test/walk-module-graph.test.ts
+@@ -348,6 +348,7 @@ function stubOutbound(
+     external: false,
+     parent: () => fetcher,
+     loaded: () => fetcher,
++    loadedProps: (props) => props,
+     session: () => (request) => fetcher.fetch(request.url),
+     final: async () => new Response(null, { status: 404 }),
+   };
+@@ -573,6 +574,7 @@ describe("walkModuleGraph modulepreload seeds", () => {
+         external: false,
+         parent: () => fetcher,
+         loaded: () => fetcher,
++        loadedProps: (props) => props,
+         session: () => (request) => fetcher.fetch(request.url),
+         final: async () => new Response(null, { status: 404 }),
+       },
