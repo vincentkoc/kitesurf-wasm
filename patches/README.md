@@ -52,3 +52,11 @@ the connection context.
 The production smoke checks navigation-global isolation, concurrent-tab isolation, input,
 click handlers, rendering and tab closure. The corrected evaluator measures the remaining
 memory growth separately; this patch is not a claim of leak-free or constant-memory browsing.
+
+After each page evaluation, the page script previously took three host `setTimeout(0)` turns
+(about 1.3 ms each in workerd) whether or not any page timer was due. That set a ~4–5 ms floor
+on every `Runtime.evaluate` and `Runtime.callFunctionOn`. The patch now drains microtasks and
+pending Boa jobs and takes a timer turn only when `pageTimerDueWithin(0)` reports a due page
+timer. A due timer is still observed before the result returns, and microtask ordering is
+unchanged. `packages/engine/test/page-task-yield.test.ts` covers both the no-turn and the
+due-timer cases.
