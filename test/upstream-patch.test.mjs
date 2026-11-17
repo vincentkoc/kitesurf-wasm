@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -45,5 +45,37 @@ test('applies only the pinned patch, is idempotent, and preserves unrelated edit
     assert.equal(readFileSync(join(dir, 'source.txt'), 'utf8'), 'operator change\n');
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('applies and restores a patch that adds a file', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'kitesurf-patch-'));
+  const git = args => execFileSync('git', ['-C', dir, ...args], { encoding: 'utf8' }).trim();
+  try {
+    git(['init', '-q']);
+    git(['config', 'user.email', 'fixture@example.invalid']);
+    git(['config', 'user.name', 'Fixture']);
+    writeFileSync(join(dir, 'source.txt'), 'before\n');
+    git(['add', 'source.txt']);
+    git(['commit', '-qm', 'fixture']);
+    const commit = git(['rev-parse', 'HEAD']);
+    writeFileSync(join(dir, 'source.txt'), 'after\n');
+    writeFileSync(join(dir, 'added.txt'), 'new\n');
+    git(['add', '-N', 'added.txt']);
+    const patch = dir + '.patch';
+    writeFileSync(patch, git(['diff', '--binary', 'HEAD']) + '\n');
+    git(['rm', '-q', '--cached', 'added.txt']);
+    rmSync(join(dir, 'added.txt'));
+    git(['restore', 'source.txt']);
+    applyUpstreamPatch(dir, commit, patch, { managed: true });
+    assert.equal(readFileSync(join(dir, 'added.txt'), 'utf8'), 'new\n');
+    applyUpstreamPatch(dir, commit, patch);
+    restoreManagedUpstreamPatch(dir);
+    assert.equal(existsSync(join(dir, 'added.txt')), false);
+    assert.equal(readFileSync(join(dir, 'source.txt'), 'utf8'), 'before\n');
+    assert.equal(git(['status', '--porcelain']), '');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(dir + '.patch', { force: true });
   }
 });

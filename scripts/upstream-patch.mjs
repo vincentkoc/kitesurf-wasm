@@ -18,7 +18,8 @@ export function restoreManagedUpstreamPatch(upstream) {
     const result = spawnSync('git', ['-C', upstream, ...args], { encoding: 'utf8' });
     if (result.status !== 0) throw new Error('Managed upstream contains operator changes; preserving them');
   }
-  git(['restore', '--source=' + commit, '--worktree', '--', '.']);
+  // The staged index was verified clean above; also drop intent-to-add entries for added files.
+  git(['restore', '--source=' + commit, '--staged', '--worktree', '--', '.']);
   rmSync(receipt);
 }
 
@@ -46,7 +47,8 @@ export function applyUpstreamPatch(upstream, commit, patchFile, { managed = fals
     const expected = git(['write-tree'], env);
     if (matches(commit)) {
       git(['apply', '--check', patchFile]);
-      git(['apply', patchFile]);
+      // Record added files as intent-to-add so tree comparison and restore can see them.
+      git(['apply', '--intent-to-add', patchFile]);
     } else if (!matches(expected)) {
       throw new Error('Upstream has changes other than the exact reviewed package patch');
     }
