@@ -806,3 +806,271 @@ index abfde6d..2ec9430 100644
          session: () => (request) => fetcher.fetch(request.url),
          final: async () => new Response(null, { status: 404 }),
        },
+diff --git a/packages/page-script/src/eval-results.ts b/packages/page-script/src/eval-results.ts
+index c675eb0..362c219 100644
+--- a/packages/page-script/src/eval-results.ts
++++ b/packages/page-script/src/eval-results.ts
+@@ -8,7 +8,7 @@ import type { EvalResult } from "@kitesurf/jsrpc-types/page-script";
+ import type { PackedException, PackedResult } from "@kitesurf/jsrpc-types/shared";
+ import { drainCdpMutations, drainConsole } from "./console-buffer.ts";
+ import { takeDocumentReopened } from "./internal-state.js";
+-import { yieldToPageTasks } from "./native-scheduling.ts";
++import { yieldToDuePageTasks } from "./page-tasks.ts";
+ import { state } from "./state.ts";
+ 
+ const POST_EVAL_TASK_TURNS = 3;
+@@ -16,9 +16,7 @@ const POST_EVAL_TASK_TURNS = 3;
+ export type EvalResultBody = PackedResult | PackedException;
+ 
+ export async function drainEvalResult(result: EvalResultBody): Promise<EvalResult> {
+-  for (let i = 0; i < POST_EVAL_TASK_TURNS; i++) {
+-    await yieldToPageTasks();
+-  }
++  await yieldToDuePageTasks(POST_EVAL_TASK_TURNS);
+   return Object.assign(result, {
+     console: drainConsole(),
+     cookieWrites: state.drainCookieWrites(),
+diff --git a/packages/page-script/src/index.ts b/packages/page-script/src/index.ts
+index ebd1fda..b0208b4 100644
+--- a/packages/page-script/src/index.ts
++++ b/packages/page-script/src/index.ts
+@@ -307,6 +307,7 @@ import {
+   pumpPageTask,
+   timerWheelStats,
+   timersScheduledCount,
++  yieldToDuePageTasks,
+ } from "./page-tasks.ts";
+ import { installGlobals } from "./globals.ts";
+ import { installNativeToString, markEngineFunctions } from "./native-functions.ts";
+@@ -7237,9 +7238,7 @@ async function queryDomWebMcpCall(
+     queryArgs.args,
+     queryArgs.invocationId,
+   );
+-  for (let i = 0; i < 3; i++) {
+-    await yieldToPageTasks();
+-  }
++  await yieldToDuePageTasks(3);
+   return result satisfies QueryDomResult<"webmcpCallTool">;
+ }
+ 
+diff --git a/packages/page-script/src/page-tasks.ts b/packages/page-script/src/page-tasks.ts
+index 7f74484..f55ccf7 100644
+--- a/packages/page-script/src/page-tasks.ts
++++ b/packages/page-script/src/page-tasks.ts
+@@ -17,7 +17,12 @@ import {
+   recheckIntersectionObservers,
+ } from "./intersection-observer.ts";
+ import { ks_bridge_ever_minted, ks_run_page_jobs } from "./wasm-glue.js";
+-import { drainSettleMicrotasks, isEngineScheduling, NativePromise } from "./native-scheduling.ts";
++import {
++  drainSettleMicrotasks,
++  isEngineScheduling,
++  NativePromise,
++  yieldToPageTasks,
++} from "./native-scheduling.ts";
+ import { ksInternals } from "./internals.ts";
+ import { ksGlobal } from "./state.ts";
+ import type { ShimWindow } from "./types.ts";
+@@ -467,6 +472,13 @@ export function nextTimerTask(): Promise<void> {
+   });
+ }
+ 
++function runBridgedPageJobs(): void {
++  if (!ks_bridge_ever_minted()) return;
++  try {
++    ks_run_page_jobs();
++  } catch {}
++}
++
+ export function pumpDueTimers(
+   deadlineMs?: number,
+   maxRunCount?: number,
+@@ -503,11 +515,7 @@ export function pumpDueTimers(
+   } finally {
+     activeTimerDeadline = previousTimerDeadline;
+   }
+-  if (ks_bridge_ever_minted()) {
+-    try {
+-      ks_run_page_jobs();
+-    } catch {}
+-  }
++  runBridgedPageJobs();
+   runningTimerIds.delete(timerEntry.id);
+   const wasCancelled = cancelledTimerIds.delete(timerEntry.id);
+   if (timerEntry.repeats && !wasCancelled) {
+@@ -595,6 +603,22 @@ export function pageTimerDueWithin(windowMs: number): boolean {
+   return nextEntry ? nextEntry.due <= nativeTimerNow() + windowMs : false;
+ }
+ 
++// Give page tasks queued by an engine call up to `maxTurns` task turns before its reply.
++// Each turn is a workerd setTimeout(0), about 1.3 ms of wall clock even when no page task
++// is due, so stop once nothing is due instead of paying an idle turn. A skipped turn would
++// only have run its own wheel entry, whose remaining effect is the boa job drain.
++export async function yieldToDuePageTasks(maxTurns: number): Promise<void> {
++  for (let turn = 0; turn < maxTurns; turn++) {
++    await drainSettleMicrotasks();
++    if (!pageTimerDueWithin(0)) {
++      runBridgedPageJobs();
++      await drainSettleMicrotasks();
++      if (!pageTimerDueWithin(0)) return;
++    }
++    await yieldToPageTasks();
++  }
++}
++
+ export function timersScheduledCount(): number {
+   return pageTimerSchedules;
+ }
+diff --git a/packages/engine/test/page-task-yield.test.ts b/packages/engine/test/page-task-yield.test.ts
+new file mode 100644
+index 0000000..531fdc3
+--- /dev/null
++++ b/packages/engine/test/page-task-yield.test.ts
+@@ -0,0 +1,147 @@
++// Copyright (c) 2026 Cloudflare, Inc.
++// Licensed under the Apache 2.0 license found in the LICENSE file or at:
++// https://opensource.org/licenses/Apache-2.0
++
++// Engine replies give due page tasks a bounded number of task turns, but skip the
++// turn when no page task is due. Each turn is a native setTimeout(0) round trip.
++// The page-script modules load through vi.importActual: engine's tsconfig must not type-check them.
++
++import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
++
++const hoisted = vi.hoisted(() => ({
++  pageTurns: 0,
++  bridgeJobs: 0,
++}));
++
++vi.mock("../../page-script/src/wasm-glue.js", () => ({
++  ks_bridge_ever_minted: () => true,
++  ks_run_page_jobs: () => {
++    hoisted.bridgeJobs++;
++  },
++}));
++
++vi.mock("../../page-script/src/dom-shim.js", () => ({
++  setAnimationTaskScheduler: () => {},
++  setModelContextTaskScheduler: () => {},
++  setWrapperSweepScheduler: () => {},
++}));
++
++vi.mock("../../page-script/src/intersection-observer.ts", () => ({
++  installIntersectionObserver: () => {},
++  recheckIntersectionObservers: () => {},
++}));
++
++vi.mock("../../page-script/src/native-scheduling.ts", async (importOriginal) => {
++  const actual = (await importOriginal()) as any;
++  return {
++    ...actual,
++    yieldToPageTasks: (ms?: number) => {
++      hoisted.pageTurns++;
++      return actual.yieldToPageTasks(ms);
++    },
++  };
++});
++
++let pageTasks: any;
++const realSetTimeout = globalThis.setTimeout;
++const realClearTimeout = globalThis.clearTimeout;
++const realSetInterval = globalThis.setInterval;
++const realClearInterval = globalThis.clearInterval;
++
++beforeAll(async () => {
++  pageTasks = await vi.importActual("../../page-script/src/page-tasks.ts");
++  // Route page timers through the wheel, as page-script does for a real page.
++  pageTasks.installPageTaskGlobals(null, () => {});
++});
++
++beforeEach(() => {
++  hoisted.pageTurns = 0;
++  hoisted.bridgeJobs = 0;
++});
++
++afterEach(async () => {
++  // Leave no wheel entry behind for the next case.
++  for (let i = 0; i < 8 && pageTasks.pageTimerDueWithin(0); i++) {
++    await pageTasks.yieldToDuePageTasks(1);
++  }
++});
++
++describe("yieldToDuePageTasks", () => {
++  it("skips the task turn when no page task is due", async () => {
++    await pageTasks.yieldToDuePageTasks(3);
++    expect(hoisted.pageTurns).toBe(0);
++    // The skipped turn's remaining effect, the boa job drain, still runs.
++    expect(hoisted.bridgeJobs).toBeGreaterThan(0);
++  });
++
++  it("does not wait for a timer that is not yet due", async () => {
++    let fired = false;
++    const id = globalThis.setTimeout(() => {
++      fired = true;
++    }, 60_000);
++    try {
++      await pageTasks.yieldToDuePageTasks(3);
++      expect(hoisted.pageTurns).toBe(0);
++      expect(fired).toBe(false);
++    } finally {
++      globalThis.clearTimeout(id);
++    }
++  });
++
++  it("still yields to a due timer before returning", async () => {
++    let fired = false;
++    globalThis.setTimeout(() => {
++      fired = true;
++    }, 0);
++    await pageTasks.yieldToDuePageTasks(3);
++    expect(fired).toBe(true);
++    expect(hoisted.pageTurns).toBeGreaterThan(0);
++    expect(hoisted.pageTurns).toBeLessThanOrEqual(3);
++  });
++
++  it("yields to a timer scheduled by a pending microtask", async () => {
++    let fired = false;
++    void Promise.resolve().then(() =>
++      globalThis.setTimeout(() => {
++        fired = true;
++      }, 0),
++    );
++    await pageTasks.yieldToDuePageTasks(3);
++    expect(fired).toBe(true);
++    expect(hoisted.pageTurns).toBeGreaterThan(0);
++  });
++
++  it("treats a queued port task as due", async () => {
++    let ran = false;
++    pageTasks.queuePortTask(() => {
++      ran = true;
++    });
++    await pageTasks.yieldToDuePageTasks(3);
++    expect(ran).toBe(true);
++    expect(hoisted.pageTurns).toBeGreaterThan(0);
++  });
++
++  it("caps an endless zero-delay chain at maxTurns", async () => {
++    let running = true;
++    let level = 0;
++    const step = () => {
++      level++;
++      if (running) globalThis.setTimeout(step, 0);
++    };
++    globalThis.setTimeout(step, 0);
++    try {
++      await pageTasks.yieldToDuePageTasks(3);
++      expect(hoisted.pageTurns).toBe(3);
++      expect(level).toBeGreaterThan(0);
++    } finally {
++      running = false;
++    }
++  });
++});
++
++afterAll(() => {
++  globalThis.setTimeout = realSetTimeout;
++  globalThis.clearTimeout = realClearTimeout;
++  globalThis.setInterval = realSetInterval;
++  globalThis.clearInterval = realClearInterval;
++});
